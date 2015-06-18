@@ -1823,6 +1823,8 @@ int schedule_cpu_switch(unsigned int cpu, struct cpupool *c)
 
  out:
     per_cpu(cpupool, cpu) = c;
+    /* Trigger a reschedule so the CPU can pick up some work ASAP. */
+    cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
 
     return 0;
 }
