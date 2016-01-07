@@ -503,7 +503,6 @@ csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 {
     struct csched_private *prv = CSCHED_PRIV(ops);
     struct csched_pcpu *spc = pcpu;
-    unsigned long flags;
 
     /*
      * Scheduler specific data for this pCPU must still be there and and be
@@ -515,7 +514,7 @@ csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
      */
     ASSERT(spc && cpumask_test_cpu(cpu, prv->cpus));
 
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
 
     prv->credit -= prv->credits_per_tslice;
     prv->ncpus--;
@@ -530,7 +529,7 @@ csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     if ( prv->ncpus == 0 )
         kill_timer(&prv->master_ticker);
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 }
 
 static void *
@@ -580,7 +579,6 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
 static void
 csched_init_pdata(const struct scheduler *ops, void *pdata, int cpu)
 {
-    unsigned long flags;
     struct csched_private *prv = CSCHED_PRIV(ops);
     struct schedule_data *sd = &per_cpu(schedule_data, cpu);
 
@@ -592,9 +590,9 @@ csched_init_pdata(const struct scheduler *ops, void *pdata, int cpu)
      */
     ASSERT(sd->schedule_lock == &sd->_lock && !spin_is_locked(&sd->_lock));
 
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
     init_pdata(prv, pdata, cpu);
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 }
 
 /* Change the scheduler of cpu to us (Credit). */
@@ -867,9 +865,8 @@ static inline void
 __csched_vcpu_acct_start(struct csched_private *prv, struct csched_vcpu *svc)
 {
     struct csched_dom * const sdom = svc->sdom;
-    unsigned long flags;
 
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
 
     if ( list_empty(&svc->active_vcpu_elem) )
     {
@@ -889,7 +886,7 @@ __csched_vcpu_acct_start(struct csched_private *prv, struct csched_vcpu *svc)
     TRACE_3D(TRC_CSCHED_ACCOUNT_START, sdom->dom->domain_id,
              svc->vcpu->vcpu_id, sdom->active_vcpu_count);
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 }
 
 static inline void
@@ -993,12 +990,12 @@ csched_vcpu_insert(const struct scheduler *ops, struct vcpu *vc)
 
     BUG_ON( is_idle_vcpu(vc) );
 
-    lock = vcpu_schedule_lock_irq(vc);
+    lock = vcpu_schedule_lock(vc);
 
     if ( !__vcpu_on_runq(svc) && vcpu_runnable(vc) && !vc->is_running )
         __runq_insert(svc);
 
-    vcpu_schedule_unlock_irq(lock, vc);
+    vcpu_schedule_unlock(lock, vc);
 
     SCHED_STAT_CRANK(vcpu_insert);
 }
@@ -1030,12 +1027,12 @@ csched_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
         vcpu_unpause(svc->vcpu);
     }
 
-    spin_lock_irq(&prv->lock);
+    spin_lock(&prv->lock);
 
     if ( !list_empty(&svc->active_vcpu_elem) )
         __csched_vcpu_acct_stop_locked(prv, svc);
 
-    spin_unlock_irq(&prv->lock);
+    spin_unlock(&prv->lock);
 
     BUG_ON( sdom == NULL );
 }
@@ -1133,12 +1130,11 @@ csched_dom_cntl(
 {
     struct csched_dom * const sdom = CSCHED_DOM(d);
     struct csched_private *prv = CSCHED_PRIV(ops);
-    unsigned long flags;
     int rc = 0;
 
     /* Protect both get and put branches with the pluggable scheduler
      * lock. Runq lock not needed anywhere in here. */
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
 
     switch ( op->cmd )
     {
@@ -1165,7 +1161,7 @@ csched_dom_cntl(
         break;
     }
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 
     return rc;
 }
@@ -1189,7 +1185,6 @@ csched_sys_cntl(const struct scheduler *ops,
     int rc = -EINVAL;
     xen_sysctl_credit_schedule_t *params = &sc->u.sched_credit;
     struct csched_private *prv = CSCHED_PRIV(ops);
-    unsigned long flags;
 
     switch ( sc->cmd )
     {
@@ -1202,10 +1197,10 @@ csched_sys_cntl(const struct scheduler *ops,
             || MICROSECS(params->ratelimit_us) > MILLISECS(params->tslice_ms) )
                 goto out;
 
-        spin_lock_irqsave(&prv->lock, flags);
+        spin_lock(&prv->lock);
         __csched_set_tslice(prv, params->tslice_ms);
         prv->ratelimit_us = params->ratelimit_us;
-        spin_unlock_irqrestore(&prv->lock, flags);
+        spin_unlock(&prv->lock);
 
         /* FALLTHRU */
     case XEN_SYSCTL_SCHEDOP_getinfo:
@@ -1279,7 +1274,6 @@ csched_runq_sort(struct csched_private *prv, unsigned int cpu)
     struct list_head *runq, *elem, *next, *last_under;
     struct csched_vcpu *svc_elem;
     spinlock_t *lock;
-    unsigned long flags;
     int sort_epoch;
 
     sort_epoch = prv->runq_sort;
@@ -1288,7 +1282,7 @@ csched_runq_sort(struct csched_private *prv, unsigned int cpu)
 
     spc->runq_sort_last = sort_epoch;
 
-    lock = pcpu_schedule_lock_irqsave(cpu, &flags);
+    lock = pcpu_schedule_lock(cpu);
 
     runq = &spc->runq;
     elem = runq->next;
@@ -1313,14 +1307,13 @@ csched_runq_sort(struct csched_private *prv, unsigned int cpu)
         elem = next;
     }
 
-    pcpu_schedule_unlock_irqrestore(lock, flags, cpu);
+    pcpu_schedule_unlock(lock, cpu);
 }
 
 static void
 csched_acct(void* dummy)
 {
     struct csched_private *prv = dummy;
-    unsigned long flags;
     struct list_head *iter_vcpu, *next_vcpu;
     struct list_head *iter_sdom, *next_sdom;
     struct csched_vcpu *svc;
@@ -1336,7 +1329,7 @@ csched_acct(void* dummy)
     int credit;
 
 
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
 
     weight_total = prv->weight;
     credit_total = prv->credit;
@@ -1351,7 +1344,7 @@ csched_acct(void* dummy)
     if ( unlikely(weight_total == 0) )
     {
         prv->credit_balance = 0;
-        spin_unlock_irqrestore(&prv->lock, flags);
+        spin_unlock(&prv->lock);
         SCHED_STAT_CRANK(acct_no_work);
         goto out;
     }
@@ -1513,7 +1506,7 @@ csched_acct(void* dummy)
 
     prv->credit_balance = credit_balance;
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 
     /* Inform each CPU that its runq needs to be sorted */
     prv->runq_sort++;
@@ -1886,7 +1879,6 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     struct csched_pcpu *spc;
     struct csched_vcpu *svc;
     spinlock_t *lock;
-    unsigned long flags;
     int loop;
 #define cpustr keyhandler_scratch
 
@@ -1897,7 +1889,7 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
      * - we scan through the runqueue, so we need the proper runqueue
      *   lock (the one of the runqueue of this cpu).
      */
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
     lock = pcpu_schedule_lock(cpu);
 
     spc = CSCHED_PCPU(cpu);
@@ -1928,7 +1920,7 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     }
 
     pcpu_schedule_unlock(lock, cpu);
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 #undef cpustr
 }
 
@@ -1938,9 +1930,8 @@ csched_dump(const struct scheduler *ops)
     struct list_head *iter_sdom, *iter_svc;
     struct csched_private *prv = CSCHED_PRIV(ops);
     int loop;
-    unsigned long flags;
 
-    spin_lock_irqsave(&prv->lock, flags);
+    spin_lock(&prv->lock);
 
 #define idlers_buf keyhandler_scratch
 
@@ -1996,7 +1987,7 @@ csched_dump(const struct scheduler *ops)
     }
 #undef idlers_buf
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    spin_unlock(&prv->lock);
 }
 
 static int
