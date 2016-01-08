@@ -47,6 +47,33 @@ const struct cpu_dev *__read_mostly cpu_devs[X86_VENDOR_NUM] = {};
 unsigned int paddr_bits __read_mostly = 36;
 unsigned int hap_paddr_bits __read_mostly = 36;
 
+#ifdef TRACE_IRQ_DISABLED
+void local_irq_disable(void)
+{
+    trace_irq_disable();
+    _local_irq_disable();
+}
+
+void local_irq_enable(void)
+{
+    trace_irq_enable();
+    _local_irq_enable();
+}
+
+void local_irq_save_raw(unsigned long *flags)
+{
+    local_save_flags(*flags);
+    trace_irq_save(*flags);
+    _local_irq_disable();
+}
+
+void local_irq_restore(unsigned long flags)
+{
+    trace_irq_restore(flags);
+    _local_irq_restore(flags);
+}
+#endif
+
 /*
  * Default host IA32_CR_PAT value to cover all memory types.
  * BIOS usually sets it to 0x07040600070406.

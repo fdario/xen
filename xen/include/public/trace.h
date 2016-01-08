@@ -270,6 +270,10 @@
 #define TRC_HW_IRQ_ASSIGN_VECTOR      (TRC_HW_IRQ + 0x6)
 #define TRC_HW_IRQ_UNMAPPED_VECTOR    (TRC_HW_IRQ + 0x7)
 #define TRC_HW_IRQ_HANDLED            (TRC_HW_IRQ + 0x8)
+#define TRC_HW_IRQ_DISABLE            (TRC_HW_IRQ + 0x9)
+#define TRC_HW_IRQ_ENABLE             (TRC_HW_IRQ + 0xA)
+#define TRC_HW_IRQ_SAVE               (TRC_HW_IRQ + 0xB)
+#define TRC_HW_IRQ_RESTORE            (TRC_HW_IRQ + 0xC)
 
 /*
  * Event Flags

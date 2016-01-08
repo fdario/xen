@@ -5,6 +5,8 @@
 #include <xen/bitops.h>
 #include <asm/processor.h>
 
+#include <xen/trace.h>
+
 #define read_sreg(name)                                         \
 ({  unsigned int __sel;                                         \
     asm volatile ( "mov %%" STR(name) ",%0" : "=r" (__sel) );   \
@@ -185,8 +187,50 @@ static always_inline unsigned long __xadd(
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
-#define local_irq_disable()     asm volatile ( "cli" : : : "memory" )
-#define local_irq_enable()      asm volatile ( "sti" : : : "memory" )
+#define _local_irq_disable()      asm volatile ( "cli" : : : "memory" )
+#define _local_irq_enable()       asm volatile ( "sti" : : : "memory" )
+
+#define TRACE_IRQ_DISABLED //XXX
+//#undef TRACE_IRQ_DISABLED //XXX
+
+#ifndef TRACE_IRQ_DISABLED
+#define local_irq_disable()       _local_irq_disable()
+#define local_irq_enable()        _local_irq_enable()
+#else
+#define TRACE_RET_ADDR     ((unsigned long) __builtin_return_address(0))
+
+#define trace_irq_disable() \
+({ \
+    uint64_t addr = TRACE_RET_ADDR;                                         \
+    if ( likely(local_irq_is_enabled()) )                                   \
+        TRACE_2D(TRC_HW_IRQ_DISABLE, (unsigned) (addr >> 32),               \
+                 (unsigned) addr);                                          \
+})
+#define trace_irq_enable()                                                  \
+({                                                                          \
+    uint64_t addr = TRACE_RET_ADDR;                                         \
+    TRACE_2D(TRC_HW_IRQ_ENABLE, (unsigned) (addr >> 32), (unsigned) addr);  \
+})
+#define trace_irq_save(x)                                                   \
+({                                                                          \
+    uint64_t addr = TRACE_RET_ADDR;                                         \
+    TRACE_3D(TRC_HW_IRQ_SAVE, !!((x) & X86_EFLAGS_IF),                      \
+             (unsigned) (addr >> 32), (unsigned) addr);                     \
+})
+#define trace_irq_restore(x)                                                \
+({                                                                          \
+    uint64_t addr = TRACE_RET_ADDR;                                         \
+    TRACE_3D(TRC_HW_IRQ_RESTORE, !!((x) & X86_EFLAGS_IF),                   \
+             (unsigned) (addr >> 32), (unsigned) addr);                     \
+})
+
+void local_irq_disable(void);
+void local_irq_enable(void);
+
+void local_irq_restore(unsigned long flags);
+void local_irq_save_raw(unsigned long *flags);
+#define local_irq_save(x)         local_irq_save_raw(&(x))
+#endif
 
 /* used in the idle loop; sti takes one instruction cycle to complete */
 #define safe_halt()     asm volatile ( "sti; hlt" : : : "memory" )
@@ -198,12 +242,12 @@ static always_inline unsigned long __xadd(
     BUILD_BUG_ON(sizeof(x) != sizeof(long));                     \
     asm volatile ( "pushf" __OS " ; pop" __OS " %0" : "=g" (x)); \
 })
-#define local_irq_save(x)                                        \
+#define _local_irq_save(x)                                       \
 ({                                                               \
     local_save_flags(x);                                         \
-    local_irq_disable();                                         \
+    _local_irq_disable();                                        \
 })
-#define local_irq_restore(x)                                     \
+#define _local_irq_restore(x)                                    \
 ({                                                               \
     BUILD_BUG_ON(sizeof(x) != sizeof(long));                     \
     asm volatile ( "pushfq\n\t"                                  \
@@ -213,6 +257,16 @@ static always_inline unsigned long __xadd(
                    : : "i?r" ( ~X86_EFLAGS_IF ),                 \
                        "ri" ( (x) & X86_EFLAGS_IF ) );           \
 })
+
+#ifndef TRACE_IRQ_DISABLED
+#define local_irq_save(x)            _local_irq_save(x)
+#define local_irq_restore(x)         _local_irq_restore(x)
+#define local_irq_save_notrace(x)    local_irq_save(x)
+#define local_irq_restore_notrace(x) local_irq_restore(x)
+#else
+#define local_irq_save_notrace(x)    _local_irq_save(x)
+#define local_irq_restore_notrace(x) _local_irq_restore(x)
+#endif
 
 static inline int local_irq_is_enabled(void)
 {
