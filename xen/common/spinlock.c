@@ -148,10 +148,40 @@ void _spin_lock(spinlock_t *lock)
     arch_lock_acquire_barrier();
 }
 
+#ifndef TRACE_IRQ_DISABLED
+#define s_local_irq_disable()  local_irq_disable()
+#define s_local_irq_enable()   local_irq_enable()
+#define s_local_irq_save(x)    local_irq_save(x)
+#define s_local_irq_restore(x) local_irq_restore(x)
+#else
+/* XXX */
+#define s_local_irq_disable()              \
+({                                         \
+    trace_irq_disable();                   \
+    _local_irq_disable();                  \
+})
+#define s_local_irq_enable()               \
+({                                         \
+    trace_irq_enable();                    \
+    _local_irq_enable();                   \
+})
+#define s_local_irq_save(x)                \
+({                                         \
+    local_save_flags(x);                   \
+    trace_irq_save(x);                     \
+    _local_irq_disable();                  \
+})
+#define s_local_irq_restore(x)             \
+({                                         \
+    trace_irq_restore(x);                  \
+    _local_irq_restore(x);                 \
+})
+#endif
+
 void _spin_lock_irq(spinlock_t *lock)
 {
     ASSERT(local_irq_is_enabled());
-    local_irq_disable();
+    s_local_irq_disable();
     _spin_lock(lock);
 }
 
@@ -159,7 +189,7 @@ unsigned long _spin_lock_irqsave(spinlock_t *lock)
 {
     unsigned long flags;
 
-    local_irq_save(flags);
+    s_local_irq_save(flags);
     _spin_lock(lock);
     return flags;
 }
@@ -176,13 +206,13 @@ void _spin_unlock(spinlock_t *lock)
 void _spin_unlock_irq(spinlock_t *lock)
 {
     _spin_unlock(lock);
-    local_irq_enable();
+    s_local_irq_enable();
 }
 
 void _spin_unlock_irqrestore(spinlock_t *lock, unsigned long flags)
 {
     _spin_unlock(lock);
-    local_irq_restore(flags);
+    s_local_irq_restore(flags);
 }
 
 int _spin_is_locked(spinlock_t *lock)
