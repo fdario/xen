@@ -246,6 +246,8 @@ int sched_init_vcpu(struct vcpu *v, unsigned int processor)
     init_timer(&v->poll_timer, poll_timer_fn,
                v, v->processor);
 
+    INIT_LIST_HEAD(&v->wakeup_list);
+
     v->sched_priv = SCHED_OP(DOM2OP(d), alloc_vdata, v, d->sched_priv);
     if ( v->sched_priv == NULL )
         return 1;
@@ -375,6 +377,7 @@ void sched_destroy_vcpu(struct vcpu *v)
     kill_timer(&v->poll_timer);
     if ( test_and_clear_bool(v->is_urgent) )
         atomic_dec(&per_cpu(schedule_data, v->processor).urgent_count);
+    ASSERT(list_empty(&v->wakeup_list));
     SCHED_OP(VCPU2OP(v), remove_vcpu, v);
     SCHED_OP(VCPU2OP(v), free_vdata, v->sched_priv);
 }
@@ -1632,6 +1635,11 @@ void __init scheduler_init(void)
         printk("Using '%s' (%s)\n", ops.name, ops.opt_name);
     }
 
+    if ( (ops.wd = xmalloc(struct wakeup_defer)) == NULL )
+        panic("failed to allocate the vcpu waqkeup list");
+    INIT_LIST_HEAD(&ops.wd->list);
+    spin_lock_init(&ops.wd->lock);
+
     if ( cpu_schedule_up(0) )
         BUG();
     register_cpu_notifier(&cpu_schedule_nfb);
@@ -1779,6 +1787,15 @@ struct scheduler *scheduler_alloc(unsigned int sched_id, int *perr)
     if ( (sched = xmalloc(struct scheduler)) == NULL )
         return NULL;
     memcpy(sched, schedulers[i], sizeof(*sched));
+
+    if ( (sched->wd = xmalloc(struct wakeup_defer)) == NULL )
+    {
+        xfree(sched);
+        return NULL;
+    }
+    INIT_LIST_HEAD(&sched->wd->list);
+    spin_lock_init(&sched->wd->lock);
+
     if ( (*perr = SCHED_OP(sched, init)) != 0 )
     {
         xfree(sched);
@@ -1792,6 +1809,11 @@ void scheduler_free(struct scheduler *sched)
 {
     BUG_ON(sched == &ops);
     SCHED_OP(sched, deinit);
+
+    ASSERT(!spin_is_locked(&sched->wd->lock) &&
+           list_empty(&sched->wd->list));
+    xfree(sched->wd);
+
     xfree(sched);
 }
 

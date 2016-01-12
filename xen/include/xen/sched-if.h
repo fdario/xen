@@ -121,11 +121,17 @@ struct task_slice {
     bool_t       migrated;
 };
 
+struct wakeup_defer {
+    struct list_head list;
+    spinlock_t lock;
+};
+
 struct scheduler {
     char *name;             /* full name for this scheduler      */
     char *opt_name;         /* option name for this scheduler    */
     unsigned int sched_id;  /* ID for this scheduler             */
     void *sched_data;       /* global data pointer               */
+    struct wakeup_defer *wd;/* for deferred vcpu wake-ups        */
 
     int          (*global_init)    (void);
 
