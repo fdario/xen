@@ -4,6 +4,7 @@
 /* Low-latency softirqs come first in the following list. */
 enum {
     TIMER_SOFTIRQ = 0,
+    DEFERRED_VCPU_WAKE_SOFTIRQ,
     SCHEDULE_SOFTIRQ,
     NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ,
     RCU_SOFTIRQ,
