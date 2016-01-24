@@ -158,6 +158,9 @@ struct vcpu
 
     struct timer     poll_timer;    /* timeout for SCHEDOP_poll */
 
+    struct list_head wakeup_list;   /* XXX */
+    int              wakeup_dfr_cpu;/* XXX */
+
     void            *sched_priv;    /* scheduler-specific data */
 
     struct vcpu_runstate_info runstate;

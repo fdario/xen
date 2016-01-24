@@ -87,6 +87,8 @@ static struct scheduler __read_mostly ops;
 #define VCPU2OP(_v)   (DOM2OP((_v)->domain))
 #define VCPU2ONLINE(_v) cpupool_domain_cpumask((_v)->domain)
 
+static DEFINE_PER_CPU(struct wakeup_defer, wd);
+
 static inline void trace_runstate_change(struct vcpu *v, int new_state)
 {
     struct { uint32_t vcpu:16, domain:16; } d;
@@ -246,6 +248,9 @@ int sched_init_vcpu(struct vcpu *v, unsigned int processor)
     init_timer(&v->poll_timer, poll_timer_fn,
                v, v->processor);
 
+    INIT_LIST_HEAD(&v->wakeup_list);
+    v->wakeup_dfr_cpu = -1;
+
     v->sched_priv = SCHED_OP(DOM2OP(d), alloc_vdata, v, d->sched_priv);
     if ( v->sched_priv == NULL )
         return 1;
@@ -375,6 +380,7 @@ void sched_destroy_vcpu(struct vcpu *v)
     kill_timer(&v->poll_timer);
     if ( test_and_clear_bool(v->is_urgent) )
         atomic_dec(&per_cpu(schedule_data, v->processor).urgent_count);
+    ASSERT(list_empty(&v->wakeup_list));
     SCHED_OP(VCPU2OP(v), remove_vcpu, v);
     SCHED_OP(VCPU2OP(v), free_vdata, v->sched_priv);
 }
@@ -1480,6 +1486,9 @@ static int cpu_schedule_up(unsigned int cpu)
     init_timer(&sd->s_timer, s_timer_fn, NULL, cpu);
     atomic_set(&sd->urgent_count, 0);
 
+    INIT_LIST_HEAD(&per_cpu(wd, cpu).list);
+    spin_lock_init(&per_cpu(wd, cpu).lock);
+
     /* Boot CPU is dealt with later in schedule_init(). */
     if ( cpu == 0 )
         return 0;
@@ -1529,7 +1538,11 @@ static void cpu_schedule_down(unsigned int cpu)
     struct schedule_data *sd = &per_cpu(schedule_data, cpu);
     struct scheduler *sched = per_cpu(scheduler, cpu);
 
-    SCHED_OP(sched, free_pdata, sd->sched_priv, cpu);
+    ASSERT(!spin_is_locked(&per_cpu(wd, cpu).lock) &&
+           list_empty(&per_cpu(wd, cpu).list));
+
+    if ( sd->sched_priv != NULL )
+        SCHED_OP(sched, free_pdata, sd->sched_priv, cpu);
     SCHED_OP(sched, free_vdata, idle_vcpu[cpu]->sched_priv);
 
     idle_vcpu[cpu]->sched_priv = NULL;

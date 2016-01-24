@@ -121,6 +121,11 @@ struct task_slice {
     bool_t       migrated;
 };
 
+struct wakeup_defer {
+    struct list_head list;
+    spinlock_t lock;
+};
+
 struct scheduler {
     char *name;             /* full name for this scheduler      */
     char *opt_name;         /* option name for this scheduler    */
