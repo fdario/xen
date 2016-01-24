@@ -429,7 +429,7 @@ void vcpu_sleep_sync(struct vcpu *v)
     sync_vcpu_execstate(v);
 }
 
-void vcpu_wake(struct vcpu *v)
+void _vcpu_wake(struct vcpu *v)
 {
     unsigned long flags;
     spinlock_t *lock;
@@ -451,6 +451,78 @@ void vcpu_wake(struct vcpu *v)
     }
 
     vcpu_schedule_unlock_irqrestore(lock, flags, v);
+}
+
+void vcpu_wake(struct vcpu *v)
+{
+    SCHED_STAT_CRANK(sched_wakeup);
+
+    if ( !in_irq() && local_irq_is_enabled() )
+    {
+        SCHED_STAT_CRANK(sched_wakeup_direct);
+        _vcpu_wake(v);
+    }
+    else
+    {
+        unsigned int cpu = smp_processor_id();
+        struct list_head *list = &per_cpu(wd, cpu).list;
+        spinlock_t *lock = &per_cpu(wd, cpu).lock;
+        unsigned long flags;
+
+        TRACE_2D(TRC_SCHED_WAKE_DFR, v->domain->domain_id, v->vcpu_id);
+        SCHED_STAT_CRANK(sched_wakeup_defer);
+
+        spin_lock_irqsave(lock, flags);
+
+        /* XXX. */
+        if ( unlikely(cmpxchg(&v->wakeup_dfr_cpu, -1, cpu) != -1) )
+        {
+            SCHED_STAT_CRANK(sched_wakeup_on_wlist);
+            spin_unlock_irqrestore(lock, flags);
+            return;
+        }
+        ASSERT(list_empty(&v->wakeup_list));
+
+        if ( list_empty(list) )
+            raise_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ);
+
+        list_add_tail(&v->wakeup_list, list);
+
+        spin_unlock_irqrestore(lock, flags);
+    }
+}
+
+void vcpu_wake_deferred(void)
+{
+    unsigned int cpu = smp_processor_id();
+    struct list_head *list = &per_cpu(wd, cpu).list;
+    spinlock_t *lock = &per_cpu(wd, cpu).lock;
+
+    SCHED_STAT_CRANK(sched_wakeup_dfr_hndl);
+
+    for ( ; ; )
+    {
+        struct vcpu *v;
+
+        SCHED_STAT_CRANK(sched_wakeup_hndl_iters);
+
+        spin_lock_irq(lock);
+
+        v = list_first_entry_or_null(list, struct vcpu, wakeup_list);
+        if ( unlikely(v == NULL) )
+        {
+            spin_unlock_irq(lock);
+            break;
+        }
+
+        ASSERT(v->wakeup_dfr_cpu == cpu);
+        list_del_init(&v->wakeup_list);
+        v->wakeup_dfr_cpu = -1;
+
+        spin_unlock_irq(lock);
+
+        _vcpu_wake(v);
+    }
 }
 
 void vcpu_unblock(struct vcpu *v)
@@ -1622,6 +1694,7 @@ void __init scheduler_init(void)
     struct domain *idle_domain;
     int i;
 
+    open_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ, vcpu_wake_deferred);
     open_softirq(SCHEDULE_SOFTIRQ, schedule);
 
     for ( i = 0; i < NUM_SCHEDULERS; i++)
