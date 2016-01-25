@@ -478,11 +478,13 @@ void vcpu_wake(struct vcpu *v)
             return;
         }
         ASSERT(list_empty(&v->wakeup_list));
-
-        if ( list_empty(list) )
-            raise_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ);
-
         list_add_tail(&v->wakeup_list, list);
+
+        if ( !per_cpu(wd, cpu).wakeup_triggered )
+        {
+            per_cpu(wd, cpu).wakeup_triggered = 1;
+            raise_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ);
+        }
 
         spin_unlock_irqrestore(lock, flags);
     }
@@ -504,9 +506,12 @@ void vcpu_wake_deferred(void)
 
         spin_lock_irq(lock);
 
+        ASSERT(per_cpu(wd, cpu).wakeup_triggered == 1);
+
         v = list_first_entry_or_null(list, struct vcpu, wakeup_list);
         if ( unlikely(v == NULL) )
         {
+            per_cpu(wd, cpu).wakeup_triggered = 0;
             spin_unlock_irq(lock);
             break;
         }
@@ -1553,6 +1558,7 @@ static int cpu_schedule_up(unsigned int cpu)
 
     INIT_LIST_HEAD(&per_cpu(wd, cpu).list);
     spin_lock_init(&per_cpu(wd, cpu).lock);
+    per_cpu(wd, cpu).wakeup_triggered = 0;
 
     /* Boot CPU is dealt with later in schedule_init(). */
     if ( cpu == 0 )

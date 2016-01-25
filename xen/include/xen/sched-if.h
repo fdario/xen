@@ -124,6 +124,7 @@ struct task_slice {
 struct wakeup_defer {
     struct list_head list;
     spinlock_t lock;
+    bool_t wakeup_triggered;
 };
 
 struct scheduler {
