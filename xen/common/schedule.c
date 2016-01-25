@@ -470,8 +470,12 @@ void vcpu_wake(struct vcpu *v)
         if ( unlikely(!list_empty(&v->wakeup_list)) )
             goto out;
 
+        if ( !sched->wd->waker_triggered )
+        {
+            sched->wd->waker_triggered = 1;
+            raise_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ);
+        }
         list_add_tail(&v->wakeup_list, list);
-        raise_softirq(DEFERRED_VCPU_WAKE_SOFTIRQ);
  out:
         spin_unlock_irqrestore(lock, flags);
     }
@@ -481,7 +485,9 @@ void vcpu_wake_deferred(void)
 {
     struct scheduler *sched = this_cpu(scheduler);
     struct list_head *list = &sched->wd->list;
+    unsigned int cpu = smp_processor_id();
     spinlock_t *lock = &sched->wd->lock;
+    int wakeups = 0;
 
     SCHED_STAT_CRANK(sched_wakeup_dfr_hndl);
 
@@ -495,13 +501,38 @@ void vcpu_wake_deferred(void)
         v = list_first_entry_or_null(list, struct vcpu, wakeup_list);
         if ( unlikely(v == NULL) )
         {
+            sched->wd->waker_triggered = 0;
             spin_unlock_irq(lock);
             break;
         }
+
+        /* XXX Important from the second iteration!  */
+        if ( wakeups >= 1 )
+        {
+            cpumask_t *online = cpupool_online_cpumask(this_cpu(cpupool));
+            unsigned int next_cpu;
+
+            next_cpu = cpumask_cycle(cpu, online);
+            ASSERT(next_cpu < nr_cpu_ids);
+
+            /* XXX. */
+            if ( next_cpu != cpu &&
+                 test_bit(SCHEDULE_SOFTIRQ, &softirq_pending(cpu)) )
+            {
+                TRACE_4D(TRC_SCHED_WAKE_DFR_RETRG, v->domain->domain_id,
+                         v->vcpu_id, wakeups, next_cpu);
+                SCHED_STAT_CRANK(sched_wakeup_newcpu);
+                cpu_raise_softirq(next_cpu, DEFERRED_VCPU_WAKE_SOFTIRQ);
+                spin_unlock_irq(lock);
+                break;
+            }
+        }
+
         list_del_init(&v->wakeup_list);
         spin_unlock_irq(lock);
 
         _vcpu_wake(v);
+        wakeups++;
     }
 }
 
@@ -1692,6 +1723,7 @@ void __init scheduler_init(void)
         panic("failed to allocate the vcpu waqkeup list");
     INIT_LIST_HEAD(&ops.wd->list);
     spin_lock_init(&ops.wd->lock);
+    ops.wd->waker_triggered = 0;
 
     if ( cpu_schedule_up(0) )
         BUG();
@@ -1848,6 +1880,7 @@ struct scheduler *scheduler_alloc(unsigned int sched_id, int *perr)
     }
     INIT_LIST_HEAD(&sched->wd->list);
     spin_lock_init(&sched->wd->lock);
+    sched->wd->waker_triggered = 0;
 
     if ( (*perr = SCHED_OP(sched, init)) != 0 )
     {
