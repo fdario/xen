@@ -91,6 +91,8 @@
 /* Trace classes for Hardware */
 #define TRC_HW_PM           0x00801000   /* Power management traces */
 #define TRC_HW_IRQ          0x00802000   /* Traces relating to the handling of IRQs */
+/* Trace class for softirqs */
+#define TRC_SW_IRQ          0x00804000   /* Traces relating to handling of softirqs */
 
 /* Trace events per class */
 #define TRC_LOST_RECORDS        (TRC_GEN + 1)
@@ -270,6 +272,13 @@
 #define TRC_HW_IRQ_ASSIGN_VECTOR      (TRC_HW_IRQ + 0x6)
 #define TRC_HW_IRQ_UNMAPPED_VECTOR    (TRC_HW_IRQ + 0x7)
 #define TRC_HW_IRQ_HANDLED            (TRC_HW_IRQ + 0x8)
+
+/* Trace events for softirqs */
+#define TRC_SIRQ_HANDLER              (TRC_SW_IRQ + 0x1)
+#define TRC_SIRQ_RAISE_MASK           (TRC_SW_IRQ + 0x2)
+#define TRC_SIRQ_RAISE_CPU            (TRC_SW_IRQ + 0x3)
+#define TRC_SIRQ_RAISE                (TRC_SW_IRQ + 0x4)
+
 
 /*
  * Event Flags
