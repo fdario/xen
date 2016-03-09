@@ -11,6 +11,7 @@ crash_debug   ?= n
 frame_pointer ?= n
 lto           ?= n
 trace_sirq    ?= n
+trace_irqoff  ?= n
 
 -include $(BASEDIR)/include/config/auto.conf
 
@@ -65,6 +66,7 @@ CFLAGS-$(perfc_arrays)  += -DPERF_ARRAYS
 CFLAGS-$(lock_profile)  += -DLOCK_PROFILE
 CFLAGS-$(frame_pointer) += -fno-omit-frame-pointer -DCONFIG_FRAME_POINTER
 CFLAGS-$(trace_sirq)    += -DTRACE_SOFTIRQ
+CFLAGS-$(trace_irqoff)  += -DTRACE_IRQ_DISABLED
 
 ifneq ($(max_phys_irqs),)
 CFLAGS-y                += -DMAX_PHYS_IRQS=$(max_phys_irqs)

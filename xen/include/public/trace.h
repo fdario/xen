@@ -272,6 +272,8 @@
 #define TRC_HW_IRQ_ASSIGN_VECTOR      (TRC_HW_IRQ + 0x6)
 #define TRC_HW_IRQ_UNMAPPED_VECTOR    (TRC_HW_IRQ + 0x7)
 #define TRC_HW_IRQ_HANDLED            (TRC_HW_IRQ + 0x8)
+#define TRC_HW_IRQ_DISABLE            (TRC_HW_IRQ + 0x9)
+#define TRC_HW_IRQ_ENABLE             (TRC_HW_IRQ + 0xA)
 
 /* Trace events for softirqs */
 #define TRC_SIRQ_HANDLER              (TRC_SW_IRQ + 0x1)
