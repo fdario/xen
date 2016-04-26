@@ -2232,7 +2232,7 @@ csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
      * And owning exactly that one (the lock of the old scheduler of this
      * cpu) is what is necessary to prevent races.
      */
-    spin_lock_irq(&prv->lock);
+    spin_lock(&prv->lock);
 
     idle_vcpu[cpu]->sched_priv = vdata;
 
@@ -2257,7 +2257,7 @@ csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
     smp_mb();
     per_cpu(schedule_data, cpu).schedule_lock = &prv->rqd[rqi].lock;
 
-    spin_unlock_irq(&prv->lock);
+    spin_unlock(&prv->lock);
 }
 
 static void
