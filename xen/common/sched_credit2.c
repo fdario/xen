@@ -332,34 +332,81 @@ struct csched2_dom {
 };
 
 /*
- * When a hard affinity change occurs, we may not be able to check some
- * (any!) of the other runqueues, when looking for the best new processor
- * for svc (as trylock-s in csched2_cpu_pick() can fail). If that happens, we
- * pick, in order of decreasing preference:
- *  - svc's current pcpu;
- *  - another pcpu from svc's current runq;
- *  - any cpu.
+ * In csched2_cpu_pick(), it may not be possible to actually look at remote
+ * runqueues (the trylock-s on their spinlock can fail!). If that happens,
+ * we pick, in order of decreasing preference:
+ *  1. if svc has a soft affinity:
+ *   1.a svc's current pcpu, if it is part of svc's soft affinity;
+ *   1.b a pcpu in svc's current runqueue that is also in svc's soft
+ *       affinity, if any;
+ *   1.c a valid pcpu that is also in svc's soft affinity, if any;
+ *  2. if none of the above applies, or svc does not have a soft affinity:
+ *   2.a svc's current pcpu, if it is part of svc's hard affinity;
+ *   2.b a pcpu in svc's current runqueue that is also in svc's hard
+ *       affinity, if any;
+ *   2.c a valid prcpu that is also in svc's hard affinity (there always
+ *       is at least one).
  */
 static int get_fallback_cpu(struct csched2_vcpu *svc)
 {
-    int cpu;
+    struct vcpu *v = svc->vcpu;
+    unsigned int cpu = nr_cpu_ids, bs;
 
-    if ( likely(cpumask_test_cpu(svc->vcpu->processor,
-                                 svc->vcpu->cpu_hard_affinity)) )
-        return svc->vcpu->processor;
+    for_each_affinity_balance_step( bs )
+    {
+        if ( bs == BALANCE_SOFT_AFFINITY
+             && !__vcpu_has_soft_affinity(v, v->cpu_hard_affinity) )
+            continue;
 
-    cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
-                &svc->rqd->active);
-    cpu = cpumask_first(cpumask_scratch);
-    if ( likely(cpu < nr_cpu_ids) )
-        return cpu;
+        affinity_balance_cpumask(v, bs, cpumask_scratch);
 
-    cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
-                cpupool_domain_cpumask(svc->vcpu->domain));
+        /*
+         * 1.a/1.b if v->processor is (still) in our affinity, go for
+         *         it, for cache betterness.
+         */
+        if ( likely(cpumask_test_cpu(v->processor, cpumask_scratch)) );
+            cpu = v->processor;
 
-    ASSERT(!cpumask_empty(cpumask_scratch));
+        /*
+         * 1.b/2.b v->processor was not there, but does our affinity contain
+         *         any cpu from our current runqueue? If yes, setup the mask
+         *         such that, right out of the loop, we pick one of them.
+         */
+        if ( likely(cpumask_intersects(cpumask_scratch, &svc->rqd->active)) )
+        {
+            cpumask_and(cpumask_scratch, v->cpu_hard_affinity,
+                        &svc->rqd->active);
+            cpu = cpumask_first(cpumask_scratch);
+            break;
+        }
 
-    return cpumask_first(cpumask_scratch);
+        /*
+         * 1.c/2.c last stand: setup the mask such that, out of loop, we pick
+         *         any one of the valid cpus. If we are doing soft-affinity
+         *         balancing, there may be no intersection again, in which
+         *         case we just stay in the loop. OTOH, if we are at the
+         *         hard-affinity balancing step, it's guaranteed that there
+         *         is at least one valid cpu, and therefore it's guaranteed
+         *         that we exit the loop with a valid value in cpu.
+         */
+        cpumask_and(cpumask_scratch, cpumask_scratch,
+                    cpupool_domain_cpumask(v->domain));
+        if ( bs == BALANCE_HARD_AFFINITY || !cpumask_empty(cpumask_scratch) )
+        {
+            cpu = cpumask_first(cpumask_scratch);
+            break;
+        }
+    }
+
+    /*
+     * We will always execute at least 2.c, so there would really be no risk
+     * of cpu to be used uninitialized. But the compiler can't spot that, and
+     * warns. We quiesce it by initializing cpu to nr_cpu_ids, and this is how
+     * we document/make sure, that its value did indeed change.
+     */
+    ASSERT(cpu < nr_cpu_ids);
+
+    return cpu;
 }
 
 /*
