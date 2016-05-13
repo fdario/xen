@@ -82,17 +82,33 @@
 
 /*
  * Locking:
- * - Schedule-lock is per-runqueue
- *  + Protects runqueue data, runqueue insertion, &c
- *  + Also protects updates to private sched vcpu structure
- *  + Must be grabbed using vcpu_schedule_lock_irq() to make sure vcpu->processr
- *    doesn't change under our feet.
- * - Private data lock
- *  + Protects access to global domain list
- *  + All other private data is written at init and only read afterwards.
+ *
+ * - runqueue lock
+ *  + it is per-runqueue, so:
+ *   * cpus in a runqueue take the runqueue lock, when using
+ *     pcpu_schedule_lock() / vcpu_schedule_lock() (and friends),
+ *   * a cpu may (try to) take a "remote" runqueue lock, e.g., for
+ *     load balancing;
+ *  + serializes runqueue operations (removing and inserting vcpus);
+ *  + protects runqueue-wide data in csched2_runqueue_data;
+ *  + protects vcpu parameters in csched2_vcpu for the vcpu in the
+ *    runqueue.
+ *
+ * - Private scheduler lock
+ *  + protects scheduler-wide data in csched2_private, such as:
+ *   * the list of domains active in this scheduler,
+ *   * what cpus and what runqueues are active and in what
+ *     runqueue each cpu is;
+ *  + serializes the operation of changing the weight of domains;
+ *  + it is a rwlock, as all data is either modified at init and
+ *    then only read (cpus & runqueues stuff), or only accessed
+ *    very rarely (the domain list).
+ *
  * Ordering:
- * - We grab private->schedule when updating domain weight; so we
- *  must never grab private if a schedule lock is held.
+ *  + tylock must be used when wanting to take a runqueue lock
+ *    while already olding one;
+ *  + if taking both a runqueue lock and the private lock is
+ *    necessary, the private lock must always be taken for first.
  */
 
 /*
@@ -267,7 +283,7 @@ struct csched2_runqueue_data {
  * System-wide private data
  */
 struct csched2_private {
-    spinlock_t lock;
+    rwlock_t lock;
     cpumask_t initialized; /* CPU is initialized for this pool */
     
     struct list_head sdom; /* Used mostly for dump keyhandler. */
@@ -1041,13 +1057,14 @@ static void
 csched2_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
 {
     struct csched2_vcpu * const svc = CSCHED2_VCPU(vc);
+    unsigned int cpu = vc->processor;
     s_time_t now = 0;
 
-    /* Schedule lock should be held at this point. */
+    ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
 
     BUG_ON( is_idle_vcpu(vc) );
 
-    if ( unlikely(curr_on_cpu(vc->processor) == vc) )
+    if ( unlikely(curr_on_cpu(cpu) == vc) )
     {
         SCHED_STAT_CRANK(vcpu_wake_running);
         goto out;
@@ -1137,7 +1154,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
     ASSERT(!cpumask_empty(&prv->active_queues));
 
     /* Locking:
-     * - vc->processor is already locked
+     * - Runqueue lock of vc->processor is already locked
      * - Need to grab prv lock to make sure active runqueues don't
      *   change
      * - Need to grab locks for other runqueues while checking
@@ -1150,8 +1167,9 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
      * just grab the prv lock.  Instead, we'll have to trylock, and
      * do something else reasonable if we fail.
      */
+    ASSERT(spin_is_locked(per_cpu(schedule_data, vc->processor).schedule_lock));
 
-    if ( !spin_trylock(&prv->lock) )
+    if ( !read_trylock(&prv->lock) )
     {
         /* We may be here because someon requested us to migrate */
         clear_bit(__CSFLAG_runq_migrate_request, &svc->flags);
@@ -1233,7 +1251,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
     }
 
 out_up:
-    spin_unlock(&prv->lock);
+    read_unlock(&prv->lock);
 
     return new_cpu;
 }
@@ -1384,15 +1402,14 @@ static void balance_load(const struct scheduler *ops, int cpu, s_time_t now)
      * on either side may be empty).
      */
 
-    /* Locking:
-     * - pcpu schedule lock should be already locked
-     */
+    /* We must be holding the lock of lrqd already */
+    ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
     st.lrqd = RQD(ops, cpu);
 
     __update_runq_load(ops, st.lrqd, 0, now);
 
 retry:
-    if ( !spin_trylock(&prv->lock) )
+    if ( !read_trylock(&prv->lock) )
         return;
 
     st.load_delta = 0;
@@ -1422,8 +1439,8 @@ retry:
         spin_unlock(&st.orqd->lock);
     }
 
-    /* Minimize holding the big lock */
-    spin_unlock(&prv->lock);
+    /* Minimize holding the private lock */
+    read_unlock(&prv->lock);
     if ( max_delta_rqi == -1 )
         goto out;
 
@@ -1562,20 +1579,26 @@ csched2_dom_cntl(
     unsigned long flags;
     int rc = 0;
 
-    /* Must hold csched2_priv lock to read and update sdom,
-     * runq lock to update csvcs. */
-    spin_lock_irqsave(&prv->lock, flags);
+    /*
+     * We must take the private lock for accessing the weights of the vpus of
+     * d. We also need the runqueue lock(s), in the putinfo case, for updating
+     * the max waight of the runqueue(s).
+     */
 
     switch ( op->cmd )
     {
     case XEN_DOMCTL_SCHEDOP_getinfo:
+        read_lock_irqsave(&prv->lock, flags);
         op->u.credit2.weight = sdom->weight;
+        read_unlock_irqrestore(&prv->lock, flags);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
         if ( op->u.credit2.weight != 0 )
         {
             struct vcpu *v;
             int old_weight;
+
+            write_lock_irqsave(&prv->lock, flags);
 
             old_weight = sdom->weight;
 
@@ -1585,11 +1608,6 @@ csched2_dom_cntl(
             for_each_vcpu ( d, v )
             {
                 struct csched2_vcpu *svc = CSCHED2_VCPU(v);
-
-                /* NB: Locking order is important here.  Because we grab this lock here, we
-                 * must never lock csched2_priv.lock if we're holding a runqueue lock.
-                 * Also, calling vcpu_schedule_lock() is enough, since IRQs have already
-                 * been disabled. */
                 spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
 
                 BUG_ON(svc->rqd != RQD(ops, svc->vcpu->processor));
@@ -1599,6 +1617,8 @@ csched2_dom_cntl(
 
                 vcpu_schedule_unlock(lock, svc->vcpu);
             }
+
+            write_unlock_irqrestore(&prv->lock, flags);
         }
         break;
     default:
@@ -1606,7 +1626,6 @@ csched2_dom_cntl(
         break;
     }
 
-    spin_unlock_irqrestore(&prv->lock, flags);
 
     return rc;
 }
@@ -1614,6 +1633,7 @@ csched2_dom_cntl(
 static void *
 csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
 {
+    struct csched2_private *prv = CSCHED2_PRIV(ops);
     struct csched2_dom *sdom;
     unsigned long flags;
 
@@ -1627,11 +1647,11 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     sdom->weight = CSCHED2_DEFAULT_WEIGHT;
     sdom->nr_vcpus = 0;
 
-    spin_lock_irqsave(&CSCHED2_PRIV(ops)->lock, flags);
+    write_lock_irqsave(&prv->lock, flags);
 
     list_add_tail(&sdom->sdom_elem, &CSCHED2_PRIV(ops)->sdom);
 
-    spin_unlock_irqrestore(&CSCHED2_PRIV(ops)->lock, flags);
+    write_unlock_irqrestore(&prv->lock, flags);
 
     return (void *)sdom;
 }
@@ -1658,12 +1678,13 @@ csched2_free_domdata(const struct scheduler *ops, void *data)
 {
     unsigned long flags;
     struct csched2_dom *sdom = data;
+    struct csched2_private *prv = CSCHED2_PRIV(ops);
 
-    spin_lock_irqsave(&CSCHED2_PRIV(ops)->lock, flags);
+    write_lock_irqsave(&prv->lock, flags);
 
     list_del_init(&sdom->sdom_elem);
 
-    spin_unlock_irqrestore(&CSCHED2_PRIV(ops)->lock, flags);
+    write_unlock_irqrestore(&prv->lock, flags);
 
     xfree(data);
 }
@@ -1817,7 +1838,7 @@ csched2_schedule(
     rqd = RQD(ops, cpu);
     BUG_ON(!cpumask_test_cpu(cpu, &rqd->active));
 
-    /* Protected by runqueue lock */        
+    ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
 
 #ifndef NDEBUG
     if ( !is_idle_vcpu(scurr->vcpu) && scurr->rqd != rqd)
@@ -1969,12 +1990,12 @@ csched2_dump_pcpu(const struct scheduler *ops, int cpu)
 
     /*
      * We need both locks:
-     * - csched2_dump_vcpu() wants to access domains' scheduling
-     *   parameters, which are protected by the private scheduler lock;
+     * - csched2_dump_vcpu() wants to access domains' weights,
+     *   which are protected by the private scheduler lock;
      * - we scan through the runqueue, so we need the proper runqueue
      *   lock (the one of the runqueue this cpu is associated to).
      */
-    spin_lock_irqsave(&prv->lock, flags);
+    read_lock_irqsave(&prv->lock, flags);
     lock = per_cpu(schedule_data, cpu).schedule_lock;
     spin_lock(lock);
 
@@ -2005,7 +2026,7 @@ csched2_dump_pcpu(const struct scheduler *ops, int cpu)
     }
 
     spin_unlock(lock);
-    spin_unlock_irqrestore(&prv->lock, flags);
+    read_unlock_irqrestore(&prv->lock, flags);
 #undef cpustr
 }
 
@@ -2018,9 +2039,11 @@ csched2_dump(const struct scheduler *ops)
     int i, loop;
 #define cpustr keyhandler_scratch
 
-    /* We need the private lock as we access global scheduler data
-     * and (below) the list of active domains. */
-    spin_lock_irqsave(&prv->lock, flags);
+    /*
+     * We need the private lock as we access global scheduler data
+     * and (below) the list of active domains.
+     */
+    read_lock_irqsave(&prv->lock, flags);
 
     printk("Active queues: %d\n"
            "\tdefault-weight     = %d\n",
@@ -2080,7 +2103,7 @@ csched2_dump(const struct scheduler *ops)
         }
     }
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    read_unlock_irqrestore(&prv->lock, flags);
 #undef cpustr
 }
 
@@ -2182,7 +2205,7 @@ init_pdata(struct csched2_private *prv, unsigned int cpu)
     unsigned rqi;
     struct csched2_runqueue_data *rqd;
 
-    ASSERT(spin_is_locked(&prv->lock));
+    ASSERT(rw_is_write_locked(&prv->lock));
     ASSERT(!cpumask_test_cpu(cpu, &prv->initialized));
 
     /* Figure out which runqueue to put it in */
@@ -2221,7 +2244,7 @@ csched2_init_pdata(const struct scheduler *ops, void *pdata, int cpu)
      */
     ASSERT(!pdata);
 
-    spin_lock_irqsave(&prv->lock, flags);
+    write_lock_irqsave(&prv->lock, flags);
     old_lock = pcpu_schedule_lock(cpu);
 
     rqi = init_pdata(prv, cpu);
@@ -2230,7 +2253,7 @@ csched2_init_pdata(const struct scheduler *ops, void *pdata, int cpu)
 
     /* _Not_ pcpu_schedule_unlock(): schedule_lock may have changed! */
     spin_unlock(old_lock);
-    spin_unlock_irqrestore(&prv->lock, flags);
+    write_unlock_irqrestore(&prv->lock, flags);
 }
 
 /* Change the scheduler of cpu to us (Credit2). */
@@ -2253,7 +2276,7 @@ csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
      * cpu) is what is necessary to prevent races.
      */
     ASSERT(!local_irq_is_enabled());
-    spin_lock(&prv->lock);
+    write_lock(&prv->lock);
 
     idle_vcpu[cpu]->sched_priv = vdata;
 
@@ -2278,7 +2301,7 @@ csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
     smp_mb();
     per_cpu(schedule_data, cpu).schedule_lock = &prv->rqd[rqi].lock;
 
-    spin_unlock(&prv->lock);
+    write_unlock(&prv->lock);
 }
 
 static void
@@ -2289,7 +2312,7 @@ csched2_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     struct csched2_runqueue_data *rqd;
     int rqi;
 
-    spin_lock_irqsave(&prv->lock, flags);
+    write_lock_irqsave(&prv->lock, flags);
 
     /*
      * alloc_pdata is not implemented, so pcpu must be NULL. On the other
@@ -2322,7 +2345,7 @@ csched2_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 
     cpumask_clear_cpu(cpu, &prv->initialized);
 
-    spin_unlock_irqrestore(&prv->lock, flags);
+    write_unlock_irqrestore(&prv->lock, flags);
 
     return;
 }
@@ -2362,7 +2385,7 @@ csched2_init(struct scheduler *ops)
         return -ENOMEM;
     ops->sched_data = prv;
 
-    spin_lock_init(&prv->lock);
+    rwlock_init(&prv->lock);
     INIT_LIST_HEAD(&prv->sdom);
 
     /* But un-initialize all runqueues */
