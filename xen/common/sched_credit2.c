@@ -611,14 +611,18 @@ __runq_remove(struct csched2_vcpu *svc)
 
 void burn_credits(struct csched2_runqueue_data *rqd, struct csched2_vcpu *, s_time_t);
 
-/* Check to see if the item on the runqueue is higher priority than what's
- * currently running; if so, wake up the processor */
-static /*inline*/ void
+/*
+ * Check to see if the item on the runqueue is higher priority than what's
+ * currently running; if so, wake up the processor.
+ *
+ * XXX
+ */
+static void
 runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
 {
-    int i, ipid=-1;
+    int i, ipid = -1;
     s_time_t lowest=(1<<30);
-    unsigned int cpu = new->vcpu->processor;
+    unsigned int bs, cpu = new->vcpu->processor;
     struct csched2_runqueue_data *rqd = RQD(ops, cpu);
     cpumask_t mask;
     struct csched2_vcpu * cur;
@@ -639,80 +643,121 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                   (unsigned char *)&d);
     }
 
-    /* Look at the cpu it's running on first */
-    cur = CSCHED2_VCPU(curr_on_cpu(cpu));
-    burn_credits(rqd, cur, now);
-
-    if ( cur->credit < new->credit )
+    for_each_affinity_balance_step( bs )
     {
-        ipid = cpu;
-        goto tickle;
-    }
-    
-    /* Get a mask of idle, but not tickled, that new is allowed to run on. */
-    cpumask_andnot(&mask, &rqd->idle, &rqd->tickled);
-    cpumask_and(&mask, &mask, new->vcpu->cpu_hard_affinity);
-    
-    /* If it's not empty, choose one */
-    i = cpumask_cycle(cpu, &mask);
-    if ( i < nr_cpu_ids )
-    {
-        ipid = i;
-        goto tickle;
-    }
-
-    /* Otherwise, look for the non-idle cpu with the lowest credit,
-     * skipping cpus which have been tickled but not scheduled yet,
-     * that new is allowed to run on. */
-    cpumask_andnot(&mask, &rqd->active, &rqd->idle);
-    cpumask_andnot(&mask, &mask, &rqd->tickled);
-    cpumask_and(&mask, &mask, new->vcpu->cpu_hard_affinity);
-
-    for_each_cpu(i, &mask)
-    {
-        /* Already looked at this one above */
-        if ( i == cpu )
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !__vcpu_has_soft_affinity(new->vcpu,
+                                       new->vcpu->cpu_hard_affinity) )
             continue;
 
-        cur = CSCHED2_VCPU(curr_on_cpu(i));
+        affinity_balance_cpumask(new->vcpu, bs, cpumask_scratch);
+        /*
+         * TODO:
+         * as an optimization, if we are at the hard-affinity step, we can
+         * probably just disregard all the cpus that we have already checked
+         * during the soft affinity step. This is because what we really
+         * considered during the first step is the '&&' of soft and hard
+         * affinity. Therefore, cpus that are in both soft and hard affinity
+         * have already been gone through!
+         *
+         * Double check this and, if true, make the following piece of code
+         * effective.
+         *
+         * if ( bs == BALANCE_HARD_AFFINITY &&
+         *      __vcpu_has_soft_affinity(new->vcpu, new->vcpu->cpu_hard_affinity) )
+         *     cpumask_andnot(cpumask_scratch, cpumask_scratch,
+         *                    new->vcpu_cpu_soft_affinity);
+         */
 
-        ASSERT(!is_idle_vcpu(cur->vcpu));
-
-        /* Update credits for current to see if we want to preempt */
+        /*
+         * Update credits of the vcpu running on former new's cpu. If that is
+         * part of the affinity, and has fewer credits, go for it.
+         */
+        cur = CSCHED2_VCPU(curr_on_cpu(cpu));
         burn_credits(rqd, cur, now);
+        if ( cur->credit < new->credit &&
+             cpumask_test_cpu(new->vcpu->processor, cpumask_scratch) )
+        {
+            ipid = cpu;
+            goto tickle;
+        }
 
-        if ( cur->credit < lowest )
+        /*
+         * Get a mask of the idle --but not tickled-- cpus that are relevant
+         * to this balancing step and, if that's non empty, pick a cpu from
+         * there.
+         */
+        cpumask_andnot(&mask, &rqd->idle, &rqd->tickled);
+        cpumask_and(&mask, &mask, cpumask_scratch);
+        i = cpumask_cycle(cpu, &mask);
+        if ( i < nr_cpu_ids )
         {
             ipid = i;
-            lowest = cur->credit;
+            goto tickle;
         }
 
-        /* TRACE */ {
-            struct {
-                unsigned vcpu:16, dom:16;
-                unsigned credit;
-            } d;
-            d.dom = cur->vcpu->domain->domain_id;
-            d.vcpu = cur->vcpu->vcpu_id;
-            d.credit = cur->credit;
-            trace_var(TRC_CSCHED2_TICKLE_CHECK, 1,
-                      sizeof(d),
-                      (unsigned char *)&d);
+        /*
+         * Otherwise, look for the non-idle cpu, among the ones that are
+         * relevant to this balancing step, that has the lowest credit
+         * (again, skipping the cpus which have been tickled but haven't
+         * scheduled yet).
+         */
+        cpumask_andnot(&mask, &rqd->active, &rqd->idle);
+        cpumask_andnot(&mask, cpumask_scratch, &rqd->tickled);
+        for_each_cpu(i, &mask)
+        {
+            /* Already looked at this one above */
+            if ( i == cpu )
+                continue;
+
+            cur = CSCHED2_VCPU(curr_on_cpu(i));
+
+            ASSERT(!is_idle_vcpu(cur->vcpu));
+
+            /* Update credits for current to see if we want to preempt */
+            burn_credits(rqd, cur, now);
+
+            if ( cur->credit < lowest )
+            {
+                ipid = i;
+                lowest = cur->credit;
+            }
+
+            /* TRACE */
+            {
+                struct {
+                    unsigned vcpu:16, dom:16;
+                    unsigned credit;
+                } d;
+                d.dom = cur->vcpu->domain->domain_id;
+                d.vcpu = cur->vcpu->vcpu_id;
+                d.credit = cur->credit;
+                trace_var(TRC_CSCHED2_TICKLE_CHECK, 1,
+                          sizeof(d),
+                          (unsigned char *)&d);
+            }
+        }
+
+        /*
+         * If we found no one, or we found a processor that is running a vcpu
+         * which has less than MIGRATE_RESIST fewer credits than new, let's
+         * try with the next balancing step (if any).
+         */
+        if ( ipid == -1 || lowest + CSCHED2_MIGRATE_RESIST > new->credit )
+        {
+            SCHED_STAT_CRANK(tickle_idlers_none);
+            continue;
         }
     }
 
-    /* Only switch to another processor if the credit difference is greater
-     * than the migrate resistance */
-    if ( ipid == -1 || lowest + CSCHED2_MIGRATE_RESIST > new->credit )
+    if ( ipid == -1 )
+        return;
+
+ tickle:
+    ASSERT(ipid != -1);
+
+    /* TRACE */
     {
-        SCHED_STAT_CRANK(tickle_idlers_none);
-        goto no_tickle;
-    }
-
-tickle:
-    BUG_ON(ipid == -1);
-
-    /* TRACE */ {
         struct {
             unsigned cpu:16, pad:16;
         } d;
@@ -721,12 +766,10 @@ tickle:
                   sizeof(d),
                   (unsigned char *)&d);
     }
+
     cpumask_set_cpu(ipid, &rqd->tickled);
     SCHED_STAT_CRANK(tickle_idlers_some);
     cpu_raise_softirq(ipid, SCHEDULE_SOFTIRQ);
-
-no_tickle:
-    return;
 }
 
 /*
@@ -813,7 +856,7 @@ void burn_credits(struct csched2_runqueue_data *rqd, struct csched2_vcpu *svc, s
 
     ASSERT(svc == CSCHED2_VCPU(curr_on_cpu(svc->vcpu->processor)));
 
-    if ( is_idle_vcpu(svc->vcpu) )
+    if ( unlikely(is_idle_vcpu(svc->vcpu)) )
     {
         ASSERT(svc->credit == CSCHED2_IDLE_CREDIT);
         return;
@@ -821,12 +864,18 @@ void burn_credits(struct csched2_runqueue_data *rqd, struct csched2_vcpu *svc, s
 
     delta = now - svc->start_time;
 
-    if ( delta > 0 ) {
+    //XXX
+    if ( likely(delta > 0) ) {
         SCHED_STAT_CRANK(burn_credits_t2c);
         t2c_update(rqd, delta, svc);
         svc->start_time = now;
     }
-    else
+    //else if ( delta == 0 )
+    //{
+    //    return;
+    //}
+    //else
+    else if ( delta < 0 )
     {
         printk(XENLOG_WARNING "%s: Time went backwards? "
                "now %"PRI_stime" start_time %"PRI_stime"\n",
