@@ -1281,8 +1281,9 @@ static void consider(balance_state_t *st,
 
 
 static void migrate(const struct scheduler *ops,
-                    struct csched2_vcpu *svc, 
-                    struct csched2_runqueue_data *trqd, 
+                    struct csched2_vcpu *svc,
+                    struct csched2_runqueue_data *trqd,
+                    int new_cpu, /* -1 == no specific cpu */
                     s_time_t now)
 {
     if ( svc->flags & CSFLAG_scheduled )
@@ -1307,10 +1308,24 @@ static void migrate(const struct scheduler *ops,
         }
         __runq_deassign(svc);
 
-        cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
-                    &trqd->active);
-        svc->vcpu->processor = cpumask_any(cpumask_scratch);
-        BUG_ON(svc->vcpu->processor >= nr_cpu_ids);
+        if ( new_cpu > 0 )
+        {
+            /*
+             * If the caller said on what cpu we specifically should move
+             * to, fullfill the request...
+             */
+            ASSERT(cpumask_test_cpu(new_cpu, &trqd->active));
+            ASSERT(cpumask_test_cpu(new_cpu, svc->vcpu->cpu_hard_affinity));
+            svc->vcpu->processor = new_cpu;
+        }
+        else
+        {
+            /* ...If he didn't, just pick one ourself */
+            cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
+                        &trqd->active);
+            svc->vcpu->processor = cpumask_any(cpumask_scratch);
+            BUG_ON(svc->vcpu->processor >= nr_cpu_ids);
+        }
 
         __runq_assign(svc, trqd);
         if ( on_runq )
@@ -1481,9 +1496,9 @@ retry:
 
     /* OK, now we have some candidates; do the moving */
     if ( st.best_push_svc )
-        migrate(ops, st.best_push_svc, st.orqd, now);
+        migrate(ops, st.best_push_svc, st.orqd, -1, now);
     if ( st.best_pull_svc )
-        migrate(ops, st.best_pull_svc, st.lrqd, now);
+        migrate(ops, st.best_pull_svc, st.lrqd, -1, now);
 
 out_up:
     spin_unlock(&st.orqd->lock);
@@ -1514,7 +1529,7 @@ csched2_vcpu_migrate(
      * pointing to a pcpu where we can't run any longer.
      */
     if ( trqd != svc->rqd )
-        migrate(ops, svc, trqd, NOW());
+        migrate(ops, svc, trqd, new_cpu, NOW());
     else
         vc->processor = new_cpu;
 }
