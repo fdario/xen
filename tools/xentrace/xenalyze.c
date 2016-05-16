@@ -7823,6 +7823,38 @@ void sched_process(struct pcpu_info *p)
                        r->rq_avgload, r->b_avgload);
             }
             break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 13): /* TICKLE_NEW */
+            if (opt.dump_all) {
+                struct {
+                    unsigned int vcpuid:16, domid:16;
+                    unsigned int credit;
+                } *r = (typeof(r))ri->d;
+
+            printf(" %s csched2: runq_tickle d%uv%u, credit = %u\n",
+                   ri->dump_header, r->domid, r->vcpuid, r->credit);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 14): /* RUNQ_MAX_WEIGHT */
+            if (opt.dump_all) {
+                struct {
+                    unsigned rqi:16, max_weight:16;
+                } *r = (typeof(r))ri->d;
+
+            printf(" %s csched2:update_max_weight rq# %u, max_weight = %u\n",
+                   ri->dump_header, r->rqi, r->max_weight);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 15): /* MIGRATE */
+            if (opt.dump_all) {
+                struct {
+                    unsigned vcpuid:16, domid:16;
+                    unsigned rqi:16, trqi:16;
+                } *r = (typeof(r))ri->d;
+
+            printf(" %s csched2:migrate d%uv%u rq# %u --> rq# %u\n",
+                   ri->dump_header, r->domid, r->vcpuid, r->rqi, r->trqi);
+            }
+            break;
         /* RTDS (TRC_RTDS_xxx) */
         case TRC_SCHED_CLASS_EVT(RTDS, 1): /* TICKLE           */
             if(opt.dump_all) {
