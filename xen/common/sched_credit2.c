@@ -909,7 +909,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                   sizeof(d),
                   (unsigned char *)&d);
     }
-    cpumask_set_cpu(ipid, &rqd->tickled);
+    __cpumask_set_cpu(ipid, &rqd->tickled);
     cpu_raise_softirq(ipid, SCHEDULE_SOFTIRQ);
 }
 
@@ -1277,7 +1277,7 @@ csched2_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
         __runq_remove(svc);
     }
     else if ( svc->flags & CSFLAG_delayed_runq_add )
-        clear_bit(__CSFLAG_delayed_runq_add, &svc->flags);
+        __clear_bit(__CSFLAG_delayed_runq_add, &svc->flags);
 }
 
 static void
@@ -1314,7 +1314,7 @@ csched2_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
      * after the context has been saved. */
     if ( unlikely(svc->flags & CSFLAG_scheduled) )
     {
-        set_bit(__CSFLAG_delayed_runq_add, &svc->flags);
+        __set_bit(__CSFLAG_delayed_runq_add, &svc->flags);
         goto out;
     }
 
@@ -1347,7 +1347,7 @@ csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
     BUG_ON( !is_idle_vcpu(vc) && svc->rqd != RQD(ops, vc->processor));
 
     /* This vcpu is now eligible to be put on the runqueue again */
-    clear_bit(__CSFLAG_scheduled, &svc->flags);
+    __clear_bit(__CSFLAG_scheduled, &svc->flags);
 
     /* If someone wants it on the runqueue, put it there. */
     /*
@@ -1357,7 +1357,7 @@ csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
      * it seems a bit pointless; especially as we have plenty of
      * bits free.
      */
-    if ( test_and_clear_bit(__CSFLAG_delayed_runq_add, &svc->flags)
+    if ( __test_and_clear_bit(__CSFLAG_delayed_runq_add, &svc->flags)
          && likely(vcpu_runnable(vc)) )
     {
         BUG_ON(__vcpu_on_runq(svc));
@@ -1399,10 +1399,10 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
 
     if ( !spin_trylock(&prv->lock) )
     {
-        if ( test_and_clear_bit(__CSFLAG_runq_migrate_request, &svc->flags) )
+        if ( __test_and_clear_bit(__CSFLAG_runq_migrate_request, &svc->flags) )
         {
             d2printk("%pv -\n", svc->vcpu);
-            clear_bit(__CSFLAG_runq_migrate_request, &svc->flags);
+            __clear_bit(__CSFLAG_runq_migrate_request, &svc->flags);
         }
 
         return get_fallback_cpu(svc);
@@ -1410,7 +1410,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
 
     /* First check to see if we're here because someone else suggested a place
      * for us to move. */
-    if ( test_and_clear_bit(__CSFLAG_runq_migrate_request, &svc->flags) )
+    if ( __test_and_clear_bit(__CSFLAG_runq_migrate_request, &svc->flags) )
     {
         if ( unlikely(svc->migrate_rqd->id < 0) )
         {
@@ -1545,8 +1545,8 @@ static void migrate(const struct scheduler *ops,
         d2printk("%pv %d-%d a\n", svc->vcpu, svc->rqd->id, trqd->id);
         /* It's running; mark it to migrate. */
         svc->migrate_rqd = trqd;
-        set_bit(_VPF_migrating, &svc->vcpu->pause_flags);
-        set_bit(__CSFLAG_runq_migrate_request, &svc->flags);
+        __set_bit(_VPF_migrating, &svc->vcpu->pause_flags);
+        __set_bit(__CSFLAG_runq_migrate_request, &svc->flags);
         SCHED_STAT_CRANK(migrate_requested);
     }
     else
@@ -2079,7 +2079,7 @@ csched2_schedule(
 
     /* Clear "tickled" bit now that we've been scheduled */
     if ( cpumask_test_cpu(cpu, &rqd->tickled) )
-        cpumask_clear_cpu(cpu, &rqd->tickled);
+        __cpumask_clear_cpu(cpu, &rqd->tickled);
 
     /* Update credits */
     burn_credits(rqd, scurr, now);
@@ -2115,7 +2115,7 @@ csched2_schedule(
     if ( snext != scurr
          && !is_idle_vcpu(scurr->vcpu)
          && vcpu_runnable(current) )
-        set_bit(__CSFLAG_delayed_runq_add, &scurr->flags);
+        __set_bit(__CSFLAG_delayed_runq_add, &scurr->flags);
 
     ret.migrated = 0;
 
@@ -2134,7 +2134,7 @@ csched2_schedule(
                        cpu, snext->vcpu, snext->vcpu->processor, scurr->vcpu);
                 BUG();
             }
-            set_bit(__CSFLAG_scheduled, &snext->flags);
+            __set_bit(__CSFLAG_scheduled, &snext->flags);
         }
 
         /* Check for the reset condition */
@@ -2146,7 +2146,7 @@ csched2_schedule(
 
         /* Clear the idle mask if necessary */
         if ( cpumask_test_cpu(cpu, &rqd->idle) )
-            cpumask_clear_cpu(cpu, &rqd->idle);
+            __cpumask_clear_cpu(cpu, &rqd->idle);
 
         snext->start_time = now;
 
@@ -2168,10 +2168,10 @@ csched2_schedule(
         if ( tasklet_work_scheduled )
         {
             if ( cpumask_test_cpu(cpu, &rqd->idle) )
-                cpumask_clear_cpu(cpu, &rqd->idle);
+                __cpumask_clear_cpu(cpu, &rqd->idle);
         }
         else if ( !cpumask_test_cpu(cpu, &rqd->idle) )
-            cpumask_set_cpu(cpu, &rqd->idle);
+            __cpumask_set_cpu(cpu, &rqd->idle);
         /* Make sure avgload gets updated periodically even
          * if there's no activity */
         update_load(ops, rqd, NULL, 0, now);
@@ -2347,7 +2347,7 @@ static void activate_runqueue(struct csched2_private *prv, int rqi)
     INIT_LIST_HEAD(&rqd->runq);
     spin_lock_init(&rqd->lock);
 
-    cpumask_set_cpu(rqi, &prv->active_queues);
+    __cpumask_set_cpu(rqi, &prv->active_queues);
 }
 
 static void deactivate_runqueue(struct csched2_private *prv, int rqi)
@@ -2360,7 +2360,7 @@ static void deactivate_runqueue(struct csched2_private *prv, int rqi)
     
     rqd->id = -1;
 
-    cpumask_clear_cpu(rqi, &prv->active_queues);
+    __cpumask_clear_cpu(rqi, &prv->active_queues);
 }
 
 static inline bool_t same_node(unsigned int cpua, unsigned int cpub)
@@ -2449,9 +2449,9 @@ init_pdata(struct csched2_private *prv, unsigned int cpu)
     /* Set the runqueue map */
     prv->runq_map[cpu] = rqi;
     
-    cpumask_set_cpu(cpu, &rqd->idle);
-    cpumask_set_cpu(cpu, &rqd->active);
-    cpumask_set_cpu(cpu, &prv->initialized);
+    __cpumask_set_cpu(cpu, &rqd->idle);
+    __cpumask_set_cpu(cpu, &rqd->active);
+    __cpumask_set_cpu(cpu, &prv->initialized);
 
     return rqi;
 }
@@ -2556,8 +2556,8 @@ csched2_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 
     printk("Removing cpu %d from runqueue %d\n", cpu, rqi);
 
-    cpumask_clear_cpu(cpu, &rqd->idle);
-    cpumask_clear_cpu(cpu, &rqd->active);
+    __cpumask_clear_cpu(cpu, &rqd->idle);
+    __cpumask_clear_cpu(cpu, &rqd->active);
 
     if ( cpumask_empty(&rqd->active) )
     {
@@ -2567,7 +2567,7 @@ csched2_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 
     spin_unlock(&rqd->lock);
 
-    cpumask_clear_cpu(cpu, &prv->initialized);
+    __cpumask_clear_cpu(cpu, &prv->initialized);
 
     spin_unlock_irqrestore(&prv->lock, flags);
 
