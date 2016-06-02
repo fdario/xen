@@ -1361,7 +1361,7 @@ static void balance_load(const struct scheduler *ops, int cpu, s_time_t now)
 
     __update_runq_load(ops, st.lrqd, 0, now);
 
-retry:
+ retry:
     if ( !spin_trylock(&prv->lock) )
         return;
 
@@ -1377,7 +1377,8 @@ retry:
              || !spin_trylock(&st.orqd->lock) )
             continue;
 
-        __update_runq_load(ops, st.orqd, 0, now);
+        /* Use a value of NOW() sampled after taking orqd's lock. */
+        __update_runq_load(ops, st.orqd, 0, NOW());
     
         delta = st.lrqd->b_avgload - st.orqd->b_avgload;
         if ( delta < 0 )
@@ -1434,6 +1435,8 @@ retry:
     /* Make sure the runqueue hasn't been deactivated since we released prv->lock */
     if ( unlikely(st.orqd->id < 0) )
         goto out_up;
+
+    now = NOW();
 
     /* Look for "swap" which gives the best load average
      * FIXME: O(n^2)! */
