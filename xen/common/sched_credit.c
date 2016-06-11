@@ -1819,24 +1819,24 @@ csched_schedule(
     else
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
 
+ out:
     /*
      * Update idlers mask if necessary. When we're idling, other CPUs
      * will tickle us when they get extra work.
      */
-    if ( snext->pri == CSCHED_PRI_IDLE )
+    if ( tasklet_work_scheduled || snext->pri != CSCHED_PRI_IDLE )
     {
-        if ( !cpumask_test_cpu(cpu, prv->idlers) )
-            cpumask_set_cpu(cpu, prv->idlers);
+        if ( cpumask_test_cpu(cpu, prv->idlers) )
+            cpumask_clear_cpu(cpu, prv->idlers);
     }
-    else if ( cpumask_test_cpu(cpu, prv->idlers) )
+    else if ( !cpumask_test_cpu(cpu, prv->idlers) )
     {
-        cpumask_clear_cpu(cpu, prv->idlers);
+        cpumask_set_cpu(cpu, prv->idlers);
     }
 
     if ( !is_idle_vcpu(snext->vcpu) )
         snext->start_time += now;
 
-out:
     /*
      * Return task to run next...
      */
