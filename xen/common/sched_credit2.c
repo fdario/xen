@@ -1545,7 +1545,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
         {
             cpumask_and(cpumask_scratch, vc->cpu_hard_affinity,
                         &svc->migrate_rqd->active);
-            new_cpu = cpumask_any(cpumask_scratch);
+            new_cpu = cpumask_first(cpumask_scratch);
             if ( new_cpu < nr_cpu_ids )
                 goto out_up;
         }
@@ -1604,7 +1604,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
 
     cpumask_and(cpumask_scratch, vc->cpu_hard_affinity,
                 &prv->rqd[min_rqi].active);
-    new_cpu = cpumask_any(cpumask_scratch);
+    new_cpu = cpumask_first(cpumask_scratch);
     BUG_ON(new_cpu >= nr_cpu_ids);
 
  out_up:
@@ -1718,7 +1718,7 @@ static void migrate(const struct scheduler *ops,
 
         cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
                     &trqd->active);
-        svc->vcpu->processor = cpumask_any(cpumask_scratch);
+        svc->vcpu->processor = cpumask_first(cpumask_scratch);
         ASSERT(svc->vcpu->processor < nr_cpu_ids);
 
         __runq_assign(svc, trqd);
