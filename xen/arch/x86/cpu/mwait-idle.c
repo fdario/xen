@@ -1135,8 +1135,8 @@ static int mwait_idle_cpu_init(struct notifier_block *nfb,
 		}
 
 		if (state > 2 && !boot_cpu_has(X86_FEATURE_NONSTOP_TSC) &&
-		    !pm_idle_save)
-			setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
+		    !pm_idle_save && system_state < SYS_STATE_active)
+			clear_tsc_cap(X86_FEATURE_TSC_RELIABLE);
 
 		cx = dev->states + dev->count;
 		cx->type = state;

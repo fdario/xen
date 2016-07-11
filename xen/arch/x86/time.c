@@ -1353,6 +1353,24 @@ static void time_calibration(void *unused)
                      &r, 1);
 }
 
+void __init clear_tsc_cap(unsigned int feature)
+{
+    void (*rendezvous_fn)(void *) = time_calibration_std_rendezvous;
+
+    if ( feature )
+        setup_clear_cpu_cap(feature);
+
+    /* If we have constant-rate TSCs then scale factor can be shared. */
+    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
+    {
+        /* If TSCs are not marked as 'reliable', re-sync during rendezvous. */
+        if ( !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
+            rendezvous_fn = time_calibration_tsc_rendezvous;
+    }
+
+    time_calibration_rendezvous_fn = rendezvous_fn;
+}
+
 static struct {
     s_time_t local_stime, master_stime;
 } ap_bringup_ref;
@@ -1477,7 +1495,7 @@ static int __init verify_tsc_reliability(void)
         {
             printk("%s: TSC warp detected, disabling TSC_RELIABLE\n",
                    __func__);
-            setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
+            clear_tsc_cap(X86_FEATURE_TSC_RELIABLE);
         }
     }
 
@@ -1490,13 +1508,7 @@ int __init init_xen_time(void)
 {
     tsc_check_writability();
 
-    /* If we have constant-rate TSCs then scale factor can be shared. */
-    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
-    {
-        /* If TSCs are not marked as 'reliable', re-sync during rendezvous. */
-        if ( !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
-            time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
-    }
+    clear_tsc_cap(0);
 
     open_softirq(TIME_CALIBRATE_SOFTIRQ, local_time_calibration);
 
