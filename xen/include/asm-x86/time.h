@@ -39,6 +39,7 @@ mktime (unsigned int year, unsigned int mon,
 int time_suspend(void);
 int time_resume(void);
 
+void preinit_pit(void);
 void init_percpu_time(void);
 void time_latch_stamps(void);
 
