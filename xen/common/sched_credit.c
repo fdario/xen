@@ -1782,7 +1782,7 @@ csched_schedule(
         snext = scurr;
         snext->start_time += now;
         perfc_incr(delay_ms);
-        tslice = MICROSECS(prv->ratelimit_us);
+        tslice = MICROSECS(prv->ratelimit_us) - runtime;
         ret.migrated = 0;
         goto out;
     }
