@@ -1978,6 +1978,10 @@ int libxl_sched_credit_params_get(libxl_ctx *ctx, uint32_t poolid,
                                   libxl_sched_credit_params *scinfo);
 int libxl_sched_credit_params_set(libxl_ctx *ctx, uint32_t poolid,
                                   libxl_sched_credit_params *scinfo);
+int libxl_sched_credit2_params_get(libxl_ctx *ctx, uint32_t poolid,
+                                   libxl_sched_credit2_params *scinfo);
+int libxl_sched_credit2_params_set(libxl_ctx *ctx, uint32_t poolid,
+                                   libxl_sched_credit2_params *scinfo);
 
 /* Scheduler Per-domain parameters */
 
