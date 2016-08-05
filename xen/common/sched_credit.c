@@ -1771,9 +1771,18 @@ csched_schedule(
      *   cpu and steal it.
      */
 
-    /* If we have schedule rate limiting enabled, check to see
-     * how long we've run for. */
-    if ( !tasklet_work_scheduled
+    /*
+     * If we have schedule rate limiting enabled, check to see
+     * how long we've run for.
+     *
+     * If scurr is yielding, however, we don't let rate limiting kick in.
+     * In fact, it may be the case that scurr is about to spin, and there's
+     * no point forcing it to do so until rate limiting expires.
+     *
+     * While there, take the chance for clearing the yield flag at once.
+     */
+    if ( !test_and_clear_bit(CSCHED_FLAG_VCPU_YIELD, &scurr->flags)
+         && !tasklet_work_scheduled
          && prv->ratelimit_us
          && vcpu_runnable(current)
          && !is_idle_vcpu(current)
@@ -1806,11 +1815,6 @@ csched_schedule(
         snext = CSCHED_VCPU(idle_vcpu[cpu]);
         snext->pri = CSCHED_PRI_TS_BOOST;
     }
-
-    /*
-     * Clear YIELD flag before scheduling out
-     */
-    clear_bit(CSCHED_FLAG_VCPU_YIELD, &scurr->flags);
 
     /*
      * SMP Load balance:

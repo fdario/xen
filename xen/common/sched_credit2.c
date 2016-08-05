@@ -2267,35 +2267,39 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     struct list_head *iter;
     struct csched2_vcpu *snext = NULL;
     struct csched2_private *prv = CSCHED2_PRIV(per_cpu(scheduler, cpu));
-    int yield_bias = 0;
-
-    /* Default to current if runnable, idle otherwise */
-    if ( vcpu_runnable(scurr->vcpu) )
-    {
-        /*
-         * The way we actually take yields into account is like this:
-         * if scurr is yielding, when comparing its credits with other
-         * vcpus in the runqueue, act like those other vcpus had yield_bias
-         * more credits.
-         */
-        if ( unlikely(scurr->flags & CSFLAG_vcpu_yield) )
-            yield_bias = CSCHED2_YIELD_BIAS;
-
-        snext = scurr;
-    }
-    else
-        snext = CSCHED2_VCPU(idle_vcpu[cpu]);
+    /*
+     * The way we actually take yields into account is like this:
+     * if scurr is yielding, when comparing its credits with other vcpus in
+     * the runqueue, act like those other vcpus had yield_bias more credits.
+     */
+    int yield_bias = __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags) ?
+                     CSCHED2_YIELD_BIAS : 0;
 
     /*
      * Return the current vcpu if it has executed for less than ratelimit.
      * Adjuststment for the selected vcpu's credit and decision
      * for how long it will run will be taken in csched2_runtime.
+     *
+     * Note that, if scurr is yielding, we don't let rate limiting kick in.
+     * In fact, it may be the case that scurr is about to spin, and there's
+     * no point forcing it to do so until rate limiting expires.
+     *
+     * To check whether we are yielding, it's enough to look at yield_bias
+     * (as CSCHED2_YIELD_BIAS can't be zero). Also, note that the yield flag
+     * has been cleared already above.
      */
-    if ( prv->ratelimit_us && !is_idle_vcpu(scurr->vcpu) &&
+    if ( !yield_bias &&
+         prv->ratelimit_us && !is_idle_vcpu(scurr->vcpu) &&
          vcpu_runnable(scurr->vcpu) &&
          (now - scurr->vcpu->runstate.state_entry_time) <
           MICROSECS(prv->ratelimit_us) )
         return scurr;
+
+    /* Default to current if runnable, idle otherwise */
+    if ( vcpu_runnable(scurr->vcpu) )
+        snext = scurr;
+    else
+        snext = CSCHED2_VCPU(idle_vcpu[cpu]);
 
     list_for_each( iter, &rqd->runq )
     {
@@ -2423,7 +2427,8 @@ csched2_schedule(
      */
     if ( tasklet_work_scheduled )
     {
-        trace_var(TRC_CSCHED2_SCHED_TASKLET, 1, 0,  NULL);
+        __clear_bit(__CSFLAG_vcpu_yield, &scurr->flags);
+        trace_var(TRC_CSCHED2_SCHED_TASKLET, 1, 0, NULL);
         snext = CSCHED2_VCPU(idle_vcpu[cpu]);
     }
     else
@@ -2435,8 +2440,6 @@ csched2_schedule(
          && !is_idle_vcpu(scurr->vcpu)
          && vcpu_runnable(current) )
         __set_bit(__CSFLAG_delayed_runq_add, &scurr->flags);
-
-    __clear_bit(__CSFLAG_vcpu_yield, &scurr->flags);
 
     ret.migrated = 0;
 
