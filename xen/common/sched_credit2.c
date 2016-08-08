@@ -2732,6 +2732,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
      */
     int yield_bias = __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags) ?
                      CSCHED2_YIELD_BIAS : 0;
+    bool_t cpu_in_soft_aff = 1;
 
     /*
      * Return the current vcpu if it has executed for less than ratelimit.
@@ -2768,8 +2769,37 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         return scurr;
     }
 
-    /* Default to current if runnable, idle otherwise */
-    if ( vcpu_runnable(scurr->vcpu) )
+    if ( !is_idle_vcpu(scurr->vcpu) &&
+         has_soft_affinity(scurr->vcpu, scurr->vcpu->cpu_hard_affinity) )
+    {
+        affinity_balance_cpumask(scurr->vcpu, BALANCE_SOFT_AFFINITY,
+                                 cpumask_scratch);
+        cpu_in_soft_aff = cpumask_test_cpu(cpu, cpumask_scratch);
+        /* Idle and not-tickled cpus from scurr's soft-affinity. */
+        cpumask_and(cpumask_scratch, cpumask_scratch, &rqd->idle);
+        cpumask_andnot(cpumask_scratch, cpumask_scratch, &rqd->tickled);
+    }
+
+    /*
+     * If scurr is runnable, and this cpu is in its soft-affinity, default to
+     * it. We also default to it, even if cpu is not in its soft-affinity, if
+     * there aren't any idle and not tickled cpu in its soft-affinity. In
+     * fact, we don't want to risk leaving scurr in the runq and this cpu idle
+     * only because it running outside of its soft-affinity.
+     *
+     * On the other hand, if cpu is not in scurr's soft-affinity, and there
+     * looks to be better options, go for them. That happens by defaulting to
+     * idle here, which means scurr will be preempted, put back in runq, and
+     * one of those idle and not tickled cpus from its soft affinity will be
+     * tickled to pick it up.
+     *
+     * If scurr does not have a valid soft-affinity, we allow it to continue
+     * run here (that's why cpu_in_soft_aff is initialized to 1).
+     *
+     * Of course, we also default to idle also if scurr is not runnable.
+     */
+    if ( vcpu_runnable(scurr->vcpu) &&
+         (cpu_in_soft_aff || cpumask_empty(cpumask_scratch)) )
         snext = scurr;
     else
         snext = CSCHED2_VCPU(idle_vcpu[cpu]);
