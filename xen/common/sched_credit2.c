@@ -506,34 +506,68 @@ void smt_idle_mask_clear(unsigned int cpu, cpumask_t *mask)
 }
 
 /*
- * When a hard affinity change occurs, we may not be able to check some
- * (any!) of the other runqueues, when looking for the best new processor
- * for svc (as trylock-s in csched2_cpu_pick() can fail). If that happens, we
- * pick, in order of decreasing preference:
- *  - svc's current pcpu;
- *  - another pcpu from svc's current runq;
- *  - any cpu.
+ * In csched2_cpu_pick(), it may not be possible to actually look at remote
+ * runqueues (the trylock-s on their spinlocks can fail!). If that happens,
+ * we pick, in order of decreasing preference:
+ *  1) svc's current pcpu, if it is part of svc's soft affinity;
+ *  2) a pcpu in svc's current runqueue that is also in svc's soft affinity;
+ *  3) just one valid pcpu from svc's soft affinity;
+ *  4) svc's current pcpu, if it is part of svc's hard affinity;
+ *  5) a pcpu in svc's current runqueue that is also in svc's hard affinity;
+ *  6) just one valid pcpu from svc's hard affinity
+ *
+ * Of course, 1, 2 and 3 makes sense only if svc has a soft affinity. Also
+ * note that at least 6 is guaranteed to _always_ return at least one pcpu.
  */
 static int get_fallback_cpu(struct csched2_vcpu *svc)
 {
     int cpu;
+    unsigned int bs;
 
-    if ( likely(cpumask_test_cpu(svc->vcpu->processor,
-                                 svc->vcpu->cpu_hard_affinity)) )
-        return svc->vcpu->processor;
+    for_each_affinity_balance_step( bs )
+    {
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(svc->vcpu, svc->vcpu->cpu_hard_affinity) )
+            continue;
 
-    cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
-                &svc->rqd->active);
-    cpu = cpumask_first(cpumask_scratch);
-    if ( likely(cpu < nr_cpu_ids) )
-        return cpu;
+        affinity_balance_cpumask(svc->vcpu, bs, cpumask_scratch);
 
-    cpumask_and(cpumask_scratch, svc->vcpu->cpu_hard_affinity,
-                cpupool_domain_cpumask(svc->vcpu->domain));
+        /*
+         * This is cases 1 or 4 (depending on bs): if v->processor is (still)
+         * in our affinity, go for it, for cache betterness.
+         */
+        if ( likely(cpumask_test_cpu(svc->vcpu->processor,
+                                     cpumask_scratch)) )
+            return svc->vcpu->processor;
 
-    ASSERT(!cpumask_empty(cpumask_scratch));
+        /*
+         * This is cases 2 or 5 (depending on bsp): v->processor isn't there
+         * any longer, check if we at least can stay in our current runq.
+         */
+        cpumask_and(cpumask_scratch, cpumask_scratch,
+                    &svc->rqd->active);
+        cpu = cpumask_first(cpumask_scratch);
+        if ( likely(cpu < nr_cpu_ids) )
+            return cpu;
 
-    return cpumask_first(cpumask_scratch);
+        /*
+         * This is cases 3 or 6 (depending on bs): last stand, just one valid
+         * pcpu from our soft affinity, if we have one and if there's any. In
+         * fact, if we are doing soft-affinity, it is possible that we fail,
+         * which means we stay in the loop and look for hard affinity. OTOH,
+         * if we are at the hard-affinity balancing step, it's guaranteed that
+         * there is at least one valid cpu, and therefore we are sure that we
+         * return it, and never really exit the loop.
+         */
+        cpumask_and(cpumask_scratch, cpumask_scratch,
+                    cpupool_domain_cpumask(svc->vcpu->domain));
+        ASSERT(!cpumask_empty(cpumask_scratch) || bs == BALANCE_SOFT_AFFINITY);
+        cpu = cpumask_first(cpumask_scratch);
+        if ( likely(cpu < nr_cpu_ids) )
+            return cpu;
+    }
+    BUG_ON(1);
+    return -1;
 }
 
 /*
@@ -1561,14 +1595,15 @@ csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
     vcpu_schedule_unlock_irq(lock, vc);
 }
 
-#define MAX_LOAD (STIME_MAX);
+#define MAX_LOAD (STIME_MAX)
 static int
 csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
 {
     struct csched2_private *prv = CSCHED2_PRIV(ops);
-    int i, min_rqi = -1, new_cpu;
+    int i, min_rqi = -1, min_s_rqi = -1, new_cpu;
     struct csched2_vcpu *svc = CSCHED2_VCPU(vc);
-    s_time_t min_avgload = MAX_LOAD;
+    s_time_t min_avgload = MAX_LOAD, min_s_avgload = MAX_LOAD;
+    bool_t has_soft;
 
     ASSERT(!cpumask_empty(&prv->active_queues));
 
@@ -1613,6 +1648,12 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
         }
         else
         {
+            /*
+             * If we've been asked to move to migrate_rqd, we should just do
+             * that, which we actually do by returning one cpu from that runq.
+             * There is no need to take care of soft affinity, as that will
+             * happen in runq_tickle().
+             */
             cpumask_and(cpumask_scratch, vc->cpu_hard_affinity,
                         &svc->migrate_rqd->active);
             new_cpu = cpumask_any(cpumask_scratch);
@@ -1622,7 +1663,21 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
         /* Fall-through to normal cpu pick */
     }
 
-    /* Find the runqueue with the lowest average load. */
+    has_soft = has_soft_affinity(vc, vc->cpu_hard_affinity);
+    if ( has_soft )
+        affinity_balance_cpumask(vc, BALANCE_SOFT_AFFINITY, cpumask_scratch);
+
+    /*
+     * What we want is:
+     *  - if we have soft affinity, the runqueue with the lowest average
+     *    load, among the ones that contain cpus in our soft affinity; this
+     *    represents the best runq on which we would want to run.
+     *  - the runqueue with the lowest average load among the ones that
+     *    contains cpus in our hard affinity; this represent the best runq
+     *    on which we can run.
+     *
+     * Find both runqueues in one pass.
+     */
     for_each_cpu(i, &prv->active_queues)
     {
         struct csched2_runqueue_data *rqd;
@@ -1656,6 +1711,13 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
             spin_unlock(&rqd->lock);
         }
 
+        if ( has_soft &&
+             rqd_avgload < min_s_avgload &&
+             cpumask_intersects(cpumask_scratch, &rqd->active) )
+        {
+            min_s_avgload = rqd_avgload;
+            min_s_rqi = i;
+        }
         if ( rqd_avgload < min_avgload )
         {
             min_avgload = rqd_avgload;
@@ -1663,9 +1725,33 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
         }
     }
 
-    /* We didn't find anyone (most likely because of spinlock contention). */
-    if ( min_rqi == -1 )
+    if ( has_soft && min_s_rqi != -1 )
     {
+        /*
+         * We have soft affinity, and we have a candidate runq, so go for it.
+         *
+         * Note that, since has_soft is true, cpumask_scratch holds the proper
+         * soft-affinity mask.
+         */
+        cpumask_and(cpumask_scratch, cpumask_scratch,
+                    &prv->rqd[min_s_rqi].active);
+    }
+    else if ( min_rqi != -1 )
+    {
+        /*
+         * Either we don't have soft affinity, or we do, but we did not find
+         * any suitable runq. But we did find one when considering hard
+         * affinity, so go for it.
+         */
+        cpumask_and(cpumask_scratch, vc->cpu_hard_affinity,
+                    &prv->rqd[min_rqi].active);
+    }
+    else
+    {
+        /*
+         * We didn't find anyone at all (most likely because of spinlock
+         * contention).
+         */
         new_cpu = get_fallback_cpu(svc);
         min_rqi = c2r(ops, new_cpu);
         min_avgload = prv->rqd[min_rqi].b_avgload;
