@@ -54,6 +54,7 @@
 #define TRC_CSCHED2_LOAD_CHECK       TRC_SCHED_CLASS_EVT(CSCHED2, 16)
 #define TRC_CSCHED2_LOAD_BALANCE     TRC_SCHED_CLASS_EVT(CSCHED2, 17)
 #define TRC_CSCHED2_PICKED_CPU       TRC_SCHED_CLASS_EVT(CSCHED2, 19)
+#define TRC_CSCHED2_RUNQ_CANDIDATE   TRC_SCHED_CLASS_EVT(CSCHED2, 20)
 
 /*
  * WARNING: This is still in an experimental phase.  Status and work can be found at the
@@ -398,6 +399,7 @@ struct csched2_vcpu {
     int credit;
     s_time_t start_time; /* When we were scheduled (used for credit) */
     unsigned flags;      /* 16 bits doesn't seem to play well with clear_bit() */
+    int tickled_cpu;     /* cpu tickled for picking us up (-1 if none) */
 
     /* Individual contribution to load */
     s_time_t load_last_update;  /* Last time average was updated */
@@ -1049,6 +1051,10 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     __cpumask_set_cpu(ipid, &rqd->tickled);
     smt_idle_mask_clear(ipid, &rqd->smt_idle);
     cpu_raise_softirq(ipid, SCHEDULE_SOFTIRQ);
+
+    if ( unlikely(new->tickled_cpu != -1) )
+        SCHED_STAT_CRANK(tickled_cpu_overwritten);
+    new->tickled_cpu = ipid;
 }
 
 /*
@@ -1266,6 +1272,7 @@ csched2_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
         ASSERT(svc->sdom != NULL);
         svc->credit = CSCHED2_CREDIT_INIT;
         svc->weight = svc->sdom->weight;
+        svc->tickled_cpu = -1;
         /* Starting load of 50% */
         svc->avgload = 1ULL << (CSCHED2_PRIV(ops)->load_precision_shift - 1);
         svc->load_last_update = NOW() >> LOADAVG_GRANULARITY_SHIFT;
@@ -1273,6 +1280,7 @@ csched2_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     else
     {
         ASSERT(svc->sdom == NULL);
+        svc->tickled_cpu = svc->vcpu->vcpu_id;
         svc->credit = CSCHED2_IDLE_CREDIT;
         svc->weight = 0;
     }
@@ -2233,7 +2241,8 @@ void __dump_execstate(void *unused);
 static struct csched2_vcpu *
 runq_candidate(struct csched2_runqueue_data *rqd,
                struct csched2_vcpu *scurr,
-               int cpu, s_time_t now)
+               int cpu, s_time_t now,
+               unsigned int *pos)
 {
     struct list_head *iter;
     struct csched2_vcpu *snext = NULL;
@@ -2262,13 +2271,29 @@ runq_candidate(struct csched2_runqueue_data *rqd,
 
         /* Only consider vcpus that are allowed to run on this processor. */
         if ( !cpumask_test_cpu(cpu, svc->vcpu->cpu_hard_affinity) )
+        {
+            (*pos)++;
             continue;
+        }
+
+        /*
+         * If a vcpu is meant to be picked up by another processor, and such
+         * processor has not scheduled yet, leave it in the runqueue for him.
+         */
+        if ( svc->tickled_cpu != -1 && svc->tickled_cpu != cpu &&
+             cpumask_test_cpu(svc->tickled_cpu, &rqd->tickled) )
+        {
+            (*pos)++;
+            SCHED_STAT_CRANK(deferred_to_tickled_cpu);
+            continue;
+        }
 
         /* If this is on a different processor, don't pull it unless
          * its credit is at least CSCHED2_MIGRATE_RESIST higher. */
         if ( svc->vcpu->processor != cpu
              && snext->credit + CSCHED2_MIGRATE_RESIST > svc->credit )
         {
+            (*pos)++;
             SCHED_STAT_CRANK(migrate_resisted);
             continue;
         }
@@ -2280,8 +2305,25 @@ runq_candidate(struct csched2_runqueue_data *rqd,
 
         /* In any case, if we got this far, break. */
         break;
-
     }
+
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            unsigned vcpu:16, dom:16;
+            unsigned tickled_cpu, position;
+        } d;
+        d.dom = snext->vcpu->domain->domain_id;
+        d.vcpu = snext->vcpu->vcpu_id;
+        d.tickled_cpu = snext->tickled_cpu;
+        d.position = *pos;
+        __trace_var(TRC_CSCHED2_RUNQ_CANDIDATE, 1,
+                    sizeof(d),
+                    (unsigned char *)&d);
+    }
+
+    if ( unlikely(snext->tickled_cpu != -1 && snext->tickled_cpu != cpu) )
+        SCHED_STAT_CRANK(tickled_cpu_overridden);
 
     return snext;
 }
@@ -2298,6 +2340,7 @@ csched2_schedule(
     struct csched2_runqueue_data *rqd;
     struct csched2_vcpu * const scurr = CSCHED2_VCPU(current);
     struct csched2_vcpu *snext = NULL;
+    unsigned int snext_pos = 0;
     struct task_slice ret;
 
     SCHED_STAT_CRANK(schedule);
@@ -2347,7 +2390,7 @@ csched2_schedule(
         snext = CSCHED2_VCPU(idle_vcpu[cpu]);
     }
     else
-        snext=runq_candidate(rqd, scurr, cpu, now);
+        snext = runq_candidate(rqd, scurr, cpu, now, &snext_pos);
 
     /* If switching from a non-idle runnable vcpu, put it
      * back on the runqueue. */
@@ -2371,8 +2414,21 @@ csched2_schedule(
             __set_bit(__CSFLAG_scheduled, &snext->flags);
         }
 
-        /* Check for the reset condition */
-        if ( snext->credit <= CSCHED2_CREDIT_RESET )
+        /*
+         * The reset condition is "has a scheduler epoch come to an end?".
+         * The way this is enforced is checking whether the vcpu at the top
+         * of the runqueue has negative credits. This means the epochs have
+         * variable lenght, as in one epoch expores when:
+         *  1) the vcpu at the top of the runqueue has executed for
+         *     around 10 ms (with default parameters);
+         *  2) no other vcpu with higher credits wants to run.
+         *
+         * Here, where we want to check for reset, we need to make sure the
+         * proper vcpu is being used. In fact, runqueue_candidate() may have
+         * not returned the first vcpu in the runqueue, for various reasons
+         * (e.g., affinity). Only trigger a reset when it does.
+         */
+        if ( snext_pos == 0 && snext->credit <= CSCHED2_CREDIT_RESET )
         {
             reset_credit(ops, cpu, now, snext);
             balance_load(ops, cpu, now);
@@ -2386,6 +2442,7 @@ csched2_schedule(
         }
 
         snext->start_time = now;
+        snext->tickled_cpu = -1;
 
         /* Safe because lock for old processor is held */
         if ( snext->vcpu->processor != cpu )
