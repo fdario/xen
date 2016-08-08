@@ -134,6 +134,8 @@
 #define TRC_CSCHED_TICKLE        TRC_SCHED_CLASS_EVT(CSCHED, 6)
 #define TRC_CSCHED_BOOST_START   TRC_SCHED_CLASS_EVT(CSCHED, 7)
 #define TRC_CSCHED_BOOST_END     TRC_SCHED_CLASS_EVT(CSCHED, 8)
+#define TRC_CSCHED_SCHEDULE      TRC_SCHED_CLASS_EVT(CSCHED, 9)
+#define TRC_CSCHED_RATELIMIT     TRC_SCHED_CLASS_EVT(CSCHED, 10)
 
 
 /*
@@ -1743,6 +1745,9 @@ csched_schedule(
     SCHED_STAT_CRANK(schedule);
     CSCHED_VCPU_CHECK(current);
 
+    TRACE_3D(TRC_CSCHED_SCHEDULE, cpu, tasklet_work_scheduled,
+             is_idle_vcpu(current));
+
     runtime = now - current->runstate.state_entry_time;
     if ( runtime < 0 ) /* Does this ever happen? */
         runtime = 0;
@@ -1792,6 +1797,8 @@ csched_schedule(
         snext->start_time += now;
         perfc_incr(delay_ms);
         tslice = MICROSECS(prv->ratelimit_us) - runtime;
+        TRACE_3D(TRC_CSCHED_RATELIMIT, scurr->vcpu->domain->domain_id,
+                 scurr->vcpu->vcpu_id, runtime);
         ret.migrated = 0;
         goto out;
     }
