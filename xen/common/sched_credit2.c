@@ -1786,19 +1786,21 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
     return new_cpu;
 }
 
-/* Working state of the load-balancing algorithm */
+/* Working state of the load-balancing algorithm. */
 typedef struct {
-    /* NB: Modified by consider() */
+    /* NB: Modified by consider(). */
     s_time_t load_delta;
     struct csched2_vcpu * best_push_svc, *best_pull_svc;
-    /* NB: Read by consider() */
+    /* NB: Read by consider() (and the various consider_foo() functions). */
     struct csched2_runqueue_data *lrqd;
-    struct csched2_runqueue_data *orqd;                  
+    struct csched2_runqueue_data *orqd;
+    bool_t push_has_soft_aff, pull_has_soft_aff;
+    s_time_t push_soft_aff_load, pull_soft_aff_load;
 } balance_state_t;
 
-static void consider(balance_state_t *st, 
-                     struct csched2_vcpu *push_svc,
-                     struct csched2_vcpu *pull_svc)
+static inline s_time_t consider_load(balance_state_t *st,
+                                     struct csched2_vcpu *push_svc,
+                                     struct csched2_vcpu *pull_svc)
 {
     s_time_t l_load, o_load, delta;
 
@@ -1821,11 +1823,166 @@ static void consider(balance_state_t *st,
     if ( delta < 0 )
         delta = -delta;
 
+    return delta;
+}
+
+/*
+ * Load balancing and soft-affinity.
+ *
+ * When trying to figure out whether or not it's best to move a vcpu from
+ * one runqueue to another, we must keep soft-affinity in mind. Intuitively
+ * we would want to know the following:
+ *  - 'how much' affinity does the vcpu have with its current runq?
+ *  - 'how much' affinity will it have with its new runq?
+ *
+ * But we certainly need to be more precise about how much it is that 'how
+ * much'! Let's start with some definitions:
+ *
+ *  - let v be a vcpu, running in runq I, with soft-affinity to vi
+ *    pcpus of runq I, and soft affinity with vj pcpus of runq J;
+ *  - let k be another vcpu, running in runq J, with soft-affinity to kj
+ *    pcpus of runq J, and with ki pcpus of runq I;
+ *  - let runq I have Ci pcpus, and runq J Cj pcpus;
+ *  - let vcpu v have an average load of lv, and k an average load of lk;
+ *  - let runq I have an average load of Li, and J an average load of Lj.
+ *
+ * We also define the following::
+ *
+ *  - lvi = lv * (vi / Ci)  as the 'perceived load' of v, when running
+ *                          in runq i;
+ *  - lvj = lv * (vj / Cj)  as the 'perceived load' of v, it running
+ *                          in runq j;
+ *  - the same for k, mutatis mutandis.
+ *
+ * Idea is that vi/Ci (i.e., the ratio of the number of cpus of a runq that
+ * a vcpu has soft-affinity with, over the total number of cpus of the runq
+ * itself) can be seen as the 'degree of soft-affinity' of v to runq I (and
+ * vj/Cj the one of v to J). In other words, we define the degree of soft
+ * affinity of a vcpu to a runq as what fraction of pcpus of the runq itself
+ * the vcpu has soft-affinity with. Then, we multiply this 'degree of
+ * soft-affinity' by the vcpu load, and call the result the 'perceived load'.
+ *
+ * Basically, if a soft-affinity is defined, the work done by a vcpu on a
+ * runq to which it has higher degree of soft-affinity, is considered
+ * 'lighter' than the same work done by the same vcpu on a runq to which it
+ * has smaller degree of soft-affinity (degree of soft affinity is <= 1). In
+ * fact, if soft-affinity is used to achieve NUMA-aware scheduling, the higher
+ * the degree of soft-affinity of the vcpu to a runq, the greater the probability
+ * of accessing local memory, when running on such runq. And that is certainly\
+ * 'lighter' than having to fetch memory from remote NUMA nodes.
+ *
+ * SoXX, evaluating pushing v from I to J would mean removing (from I) a
+ * perceived load of lv*(vi/Ci) and adding (to J) a perceived load of
+ * lv*(vj/Cj), which we (looking at things from the point of view of I,
+ * which is what balance_load() does) can call D_push:
+ *
+ *  - D_push = -lv * (vi / Ci) + lv * (vj / Cj) =
+ *           = lv * (vj/Cj - vi/Ci)
+ *
+ * On the other hand, pulling k from J to I would entail a D_pull:
+ *
+ *  - D_pull = lk * (ki / Ci) - lk * (kj / Cj) =
+ *           = lk * (ki/Ci - kj/Cj)
+ *
+ * Note that if v (k) has soft-afinity with all the cpus of both I and J,
+ * D_push (D_pull) will be 0, and the same is true in case it has no soft
+ * affinity at all with any of the cpus of I and J. Note also that both
+ * D_push and D_pull can be positive or negative (there's no abs() around
+ * in this case!) depending on the relationship between the degrees of soft
+ * affinity of the vcpu to I and J.
+ *
+ * If there is no soft-affinity, load_balance() (actually, consider()) acts
+ * as follows:
+ *
+ *  - D = abs(Li - Lj)
+ *  - consider pushing v from I to J:
+ *     - D' = abs(Li - lv - (Lj + lv))   (from now, abs(x) == |x|)
+ *     - if (D' < D) { push }
+ *  - consider pulling k from J to I:
+ *     - D' = |Li + lk - (Lj - lk)|
+ *     - if (D' < D) { pull }
+ *  - consider both push and pull:
+ *     - D' = |Li - lv + lk - (Lj + lv - lk)|
+ *     - if (D' < D) { push; pull }
+ *
+ * In order to make soft-affinity part of the process, we use D_push and
+ * D_pull, so that, the final behavior will look like this:
+ *
+ *  - D = abs(Li - Lj)
+ *  - consider pushing v from I to J:
+ *     - D' = |Li - lv - (Lj + lv)|
+ *     - D_push = lv * (vj/Cj - vi/Ci)
+ *     - if (D' + D_push < D) { push }
+ *  - consider pulling k from J to I:
+ *     - D' = |Li + lk - (Lj - lk)|
+ *       D_pull = lk * (ki/Ci - kj/Cj)
+ *     - if (D' < D) { pull }
+ *  - consider both push and pull:
+ *     - D' = |Li - lv + lk - (Lj + lv - lk)|
+ *     - D_push = lv * (vj/Cj - vi/Ci)
+ *       D_pull = lk * (ki/Ci - kj/Cj)
+ *     - if (D' + D_push + D_pull < D) { push; pull }
+ *
+ * So, for instance, the complete formula, in case of a push, with soft
+ * affinity being considered looks like this:
+ *
+ *  - D'' = D' + D_push =
+ *        = |Li - lv - (Lj + lv)| + lv*(vj/Cj - vi/Ci)
+ *
+ * which highlights how soft-affinity being considered acts as a *modifier*
+ * of the "normal" results obtained by just using the actual vcpus loads.
+ * This approach is modular, in the sense that it only takes implementing
+ * another function that returns another modifier, to make the load balancer
+ * consider some other factor or characteristics of the vcpus.
+ *
+ * Finally there is the scope for actually using a scaling factor, to limit
+ * the influence that soft-affinity will actually have on baseline results
+ * from consider_load(). Basically, that means that instead of D_push and/or
+ * D_pull, we'll be adding D_push/S and/or D_pull/S (with S the scaling
+ * factor). Check prep_soft_aff_load() for details on this.
+ */
+
+static inline s_time_t consider_soft_affinity(balance_state_t *st,
+                                              struct csched2_vcpu *push_svc,
+                                              struct csched2_vcpu *pull_svc)
+{
+    s_time_t push_load = push_svc ? st->push_soft_aff_load : 0;
+    s_time_t pull_load = pull_svc ? st->pull_soft_aff_load : 0;
+
+    /*
+     * This is potentially called many times, and a few of them, on the same
+     * vcpu(s). Therefore, all the expensive operations (e.g., the cpumask
+     * manipulations) are done in balance_load(), in the attempt of amortizing
+     * the cost, and all that remains to be done here is return the proper
+     * combination of results.
+     */
+    return push_load + pull_load;
+}
+
+static void consider(balance_state_t *st,
+                     struct csched2_vcpu *push_svc,
+                     struct csched2_vcpu *pull_svc)
+{
+    s_time_t delta, delta_soft_aff;
+
+    /*
+     * The idea here is:
+     *  - consider_load() is the basic step. It compares what would happen
+     *    if the requested combination of pushes and pulls is done, using
+     *    the actual load of the vcpus being considered;
+     *  - subsequent steps return a *modifier* for the result obtained
+     *    above, which is then applied, before drawing conclusions.
+     */
+    delta = consider_load(st, push_svc, pull_svc);
+    delta_soft_aff = consider_soft_affinity(st, push_svc, pull_svc);
+
+    delta += delta_soft_aff;
+
     if ( delta < st->load_delta )
     {
         st->load_delta = delta;
-        st->best_push_svc=push_svc;
-        st->best_pull_svc=pull_svc;
+        st->best_push_svc = push_svc;
+        st->best_pull_svc = pull_svc;
     }
 }
 
@@ -1901,12 +2058,101 @@ static bool_t vcpu_is_migrateable(struct csched2_vcpu *svc,
            cpumask_intersects(svc->vcpu->cpu_hard_affinity, &rqd->active);
 }
 
+/*
+ * Compute the load modifiers to be used in consider() and store them in st.
+ *
+ * aff_shift gives the chance to change how much soft-affinity should affect
+ * load balancing, i.e., the scaling factor introduced above.
+ *
+ * It's a shift width and using for it the same value as prec_shift will make
+ * the scaling factor 1. Using smaller values, will exponentially decrease
+ * the impact of soft-affinity. E.g., aff_shift=prec_shift-1 would make the
+ * scaling factor be 2 (S=2 in the formulas above), which in turn means
+ * D_push and D_pull will be halved, and so on and so forth.
+ */
+static inline s_time_t prep_soft_aff_load(const struct csched2_vcpu *svc,
+                                          const balance_state_t *st,
+                                          unsigned int nr_cpus_lrq,
+                                          unsigned int nr_cpus_orq,
+                                          unsigned int prec_shift,
+                                          unsigned int aff_shift,
+                                          bool_t is_push)
+{
+    s_time_t l_weight, o_weight;
+    s_time_t load, weight;
+    cpumask_t aff_mask;
+
+    ASSERT(aff_shift <= prec_shift);
+
+    /* Compute the degree of soft-affinity of svc to both lrq and orq. */
+    affinity_balance_cpumask(svc->vcpu, BALANCE_SOFT_AFFINITY, &aff_mask);
+    cpumask_and(cpumask_scratch, &aff_mask, &st->lrqd->active);
+    l_weight = (cpumask_weight(cpumask_scratch) << aff_shift) / nr_cpus_lrq;
+    cpumask_and(cpumask_scratch, &aff_mask, &st->orqd->active);
+    o_weight = (cpumask_weight(cpumask_scratch) << aff_shift) / nr_cpus_orq;
+
+    if ( l_weight >= o_weight )
+    {
+        weight = l_weight - o_weight;
+        load = 1;
+    }
+    else
+    {
+        weight = o_weight - l_weight;
+        load = -1;
+    }
+
+    if ( !is_push )
+        weight = -weight;
+
+    load *= (svc->avgload * weight) >> prec_shift;
+
+    /*
+     * Remember that what we are after is actually a modifier. So, for
+     * instance, let our vcpu be v, with load 30%, let's consider pushing
+     * it from runq I, to which it has a degree of soft-affinity of 3/8, to
+     * J, to which it has a degree of soft-affinity of 6/8, and let's say
+     * load of I is 40% and load of J is 15%
+     *
+     * Plain load calculations (i.e., no soft affinity involved) are as
+     * follows:
+     *  - D = abs(40 - 15) = 25
+     *  - consider_load:
+     *    - D' = abs(40 - 30 - (15 + 30)) = abs(10 - 45) = 35
+     *  - D' > D ==> don't push
+     *
+     * And this indeed will be the result returned by consider_load(). Now
+     * we need D_push (let's assume a scaling factor of 1). Following the
+     * code above:
+     *
+     *  - l_weight = 3/8 = 0.375
+     *  - o_weight = 6/8 = 0.75
+     *  - weight = 0.75 - 0.375 = 0.375, load = -1
+     *  - load = -1 * 30 * 0.375 = -11.25
+     *
+     * which, once back in consider() would mean:
+     *  - D = 25
+     *  - D' = 35
+     *  - D_push = -11.25
+     *  - D' + D_push = 35 - 11.25 = 23.75
+     *  - D ' + D_push < D ==> *push*
+     *
+     * which means considering soft-affinity changed the original load
+     * balancer decision, and seems to makes sense, considering that we'd be
+     * moving v from a runq where it only has affinity with 3 vcpus (out of
+     * 8) to one where it has twice as much of that.
+     */
+    ASSERT(load >= 0 ? svc->avgload >= load : svc->avgload >= -load);
+    return load;
+}
+
 static void balance_load(const struct scheduler *ops, int cpu, s_time_t now)
 {
     struct csched2_private *prv = CSCHED2_PRIV(ops);
     int i, max_delta_rqi = -1;
     struct list_head *push_iter, *pull_iter;
-    bool_t inner_load_updated = 0;
+    unsigned int nr_cpus_lrq, nr_cpus_orq;
+    bool_t inner_loop_done_once = 0;
 
     balance_state_t st = { .best_push_svc = NULL, .best_pull_svc = NULL };
 
@@ -1962,15 +2208,13 @@ retry:
         s_time_t load_max;
         int cpus_max;
 
-        
         load_max = st.lrqd->b_avgload;
         if ( st.orqd->b_avgload > load_max )
             load_max = st.orqd->b_avgload;
 
-        cpus_max = cpumask_weight(&st.lrqd->active);
-        i = cpumask_weight(&st.orqd->active);
-        if ( i > cpus_max )
-            cpus_max = i;
+        cpus_max = nr_cpus_lrq = cpumask_weight(&st.lrqd->active);
+        nr_cpus_orq = cpumask_weight(&st.orqd->active);
+        cpus_max = nr_cpus_orq > cpus_max ? nr_cpus_orq : cpus_max;
 
         if ( unlikely(tb_init_done) )
         {
@@ -2033,6 +2277,8 @@ retry:
      * FIXME: O(n^2)! */
 
     /* Reuse load delta (as we're trying to minimize it) */
+    st.load_delta = st.load_delta;
+
     list_for_each( push_iter, &st.lrqd->svc )
     {
         struct csched2_vcpu * push_svc = list_entry(push_iter, struct csched2_vcpu, rqd_elem);
@@ -2042,34 +2288,81 @@ retry:
         if ( !vcpu_is_migrateable(push_svc, st.orqd) )
             continue;
 
+        /*
+         * Soft affinity related code being present here, is the price we pay
+         * to performance. In fact, ideally, this would all go into
+         * consider_soft_aff(). However, that would mean doing all it's done
+         * here (i.e., cpumask stuff in has_soft_affinity() and both cpumask
+         * stuff and medium heavy math in prep_soft_aff_load()), for the *same*
+         * vcpu, 1+nr_vcpus_in_orq times!
+         *
+         * So, yes, it's less beautiful and modular than it could have been,
+         * but this is an hot path, and we can't afford being that beautiful
+         * and modular.
+         */
+        if ( has_soft_affinity(push_svc->vcpu,
+                               push_svc->vcpu->cpu_hard_affinity) )
+        {
+            st.push_has_soft_aff = 1;
+            st.push_soft_aff_load = prep_soft_aff_load(push_svc, &st,
+                                                       nr_cpus_lrq,
+                                                       nr_cpus_orq,
+                                                       prv->load_precision_shift,
+                                                       prv->load_precision_shift - 0,
+                                                       1 /* is a push */);
+        }
+        else
+        {
+            st.push_has_soft_aff = 0;
+            st.push_soft_aff_load = 0;
+        }
+
+        /* Consider push only. */
+        consider(&st, push_svc, NULL);
+
         list_for_each( pull_iter, &st.orqd->svc )
         {
             struct csched2_vcpu * pull_svc = list_entry(pull_iter, struct csched2_vcpu, rqd_elem);
             
-            if ( !inner_load_updated )
+            if ( !inner_loop_done_once )
                 __update_svc_load(ops, pull_svc, 0, now);
-        
+
             if ( !vcpu_is_migrateable(pull_svc, st.lrqd) )
                 continue;
 
+            /*
+             * Same argument as above about modularity. For pulls, it would
+             * be a little less of a problem having stuff done in
+             * consider_soft_aff(), as we'd be "only" doing the same ops on
+             * the same vcpus twice, but:
+             *  - doing them twice is still worse than doing them once;
+             *  - since push side is like this, it's better to be consistent.
+             */
+            if ( has_soft_affinity(pull_svc->vcpu,
+                                   pull_svc->vcpu->cpu_hard_affinity) )
+            {
+                st.pull_has_soft_aff = 1;
+                st.pull_soft_aff_load = prep_soft_aff_load(pull_svc, &st,
+                                                           nr_cpus_lrq,
+                                                           nr_cpus_orq,
+                                                           prv->load_precision_shift,
+                                                           prv->load_precision_shift - 0,
+                                                           0 /* is a pull */);
+            }
+            else
+            {
+                st.pull_has_soft_aff = 0;
+                st.pull_soft_aff_load = 0;
+            }
+
+            /* Consider pull only. */
+            if ( !inner_loop_done_once )
+                consider(&st, NULL, pull_svc);
+
+            /* Consider both push and pull. */
             consider(&st, push_svc, pull_svc);
         }
-
-        inner_load_updated = 1;
-
-        /* Consider push only */
-        consider(&st, push_svc, NULL);
-    }
-
-    list_for_each( pull_iter, &st.orqd->svc )
-    {
-        struct csched2_vcpu * pull_svc = list_entry(pull_iter, struct csched2_vcpu, rqd_elem);
-        
-        if ( !vcpu_is_migrateable(pull_svc, st.lrqd) )
-            continue;
-
-        /* Consider pull only */
-        consider(&st, NULL, pull_svc);
+        inner_loop_done_once = 1;
     }
 
     /* OK, now we have some candidates; do the moving */
