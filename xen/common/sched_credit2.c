@@ -144,6 +144,9 @@
 #define CSCHED2_MIGRATE_RESIST       ((opt_migrate_resist)*MICROSECS(1))
 /* How much to "compensate" a vcpu for L2 migration */
 #define CSCHED2_MIGRATE_COMPENSATION MICROSECS(50)
+/* How big of a bias we should have against a yielding vcpu */
+#define CSCHED2_YIELD_BIAS           ((opt_yield_bias)*MICROSECS(1))
+#define CSCHED2_YIELD_BIAS_MIN       CSCHED2_MIN_TIMER
 /* Reset: Value below which credit will be reset. */
 #define CSCHED2_CREDIT_RESET         0
 /* Max timer: Maximum time a guest can be run for. */
@@ -181,10 +184,19 @@
  */
 #define __CSFLAG_runq_migrate_request 3
 #define CSFLAG_runq_migrate_request (1<<__CSFLAG_runq_migrate_request)
-
+/*
+ * CSFLAG_vcpu_yield: this vcpu was running, and has called vcpu_yield(). The
+ * scheduler is invoked to see if we can give the cpu to someone else, and
+ * get back to the yielding vcpu in a while.
+ */
+#define __CSFLAG_vcpu_yield 4
+#define CSFLAG_vcpu_yield (1<<__CSFLAG_vcpu_yield)
 
 static unsigned int __read_mostly opt_migrate_resist = 500;
 integer_param("sched_credit2_migrate_resist", opt_migrate_resist);
+
+static unsigned int __read_mostly opt_yield_bias = 1000;
+integer_param("sched_credit2_yield_bias", opt_yield_bias);
 
 /*
  * Useful macros
@@ -1432,6 +1444,14 @@ out:
 }
 
 static void
+csched2_vcpu_yield(const struct scheduler *ops, struct vcpu *v)
+{
+    struct csched2_vcpu * const svc = CSCHED2_VCPU(v);
+
+    __set_bit(__CSFLAG_vcpu_yield, &svc->flags);
+}
+
+static void
 csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
 {
     struct csched2_vcpu * const svc = CSCHED2_VCPU(vc);
@@ -2247,10 +2267,22 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     struct list_head *iter;
     struct csched2_vcpu *snext = NULL;
     struct csched2_private *prv = CSCHED2_PRIV(per_cpu(scheduler, cpu));
+    int yield_bias = 0;
 
     /* Default to current if runnable, idle otherwise */
     if ( vcpu_runnable(scurr->vcpu) )
+    {
+        /*
+         * The way we actually take yields into account is like this:
+         * if scurr is yielding, when comparing its credits with other
+         * vcpus in the runqueue, act like those other vcpus had yield_bias
+         * more credits.
+         */
+        if ( unlikely(scurr->flags & CSFLAG_vcpu_yield) )
+            yield_bias = CSCHED2_YIELD_BIAS;
+
         snext = scurr;
+    }
     else
         snext = CSCHED2_VCPU(idle_vcpu[cpu]);
 
@@ -2268,6 +2300,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     list_for_each( iter, &rqd->runq )
     {
         struct csched2_vcpu * svc = list_entry(iter, struct csched2_vcpu, runq_elem);
+        int svc_credit = svc->credit + yield_bias;
 
         /* Only consider vcpus that are allowed to run on this processor. */
         if ( !cpumask_test_cpu(cpu, svc->vcpu->cpu_hard_affinity) )
@@ -2288,19 +2321,23 @@ runq_candidate(struct csched2_runqueue_data *rqd,
             continue;
         }
 
-        /* If this is on a different processor, don't pull it unless
-         * its credit is at least CSCHED2_MIGRATE_RESIST higher. */
+        /*
+         * If this is on a different processor, don't pull it unless
+         * its credit is at least CSCHED2_MIGRATE_RESIST higher.
+         */
         if ( svc->vcpu->processor != cpu
-             && snext->credit + CSCHED2_MIGRATE_RESIST > svc->credit )
+             && snext->credit + CSCHED2_MIGRATE_RESIST > svc_credit )
         {
             (*pos)++;
             SCHED_STAT_CRANK(migrate_resisted);
             continue;
         }
 
-        /* If the next one on the list has more credit than current
-         * (or idle, if current is not runnable), choose it. */
-        if ( svc->credit > snext->credit )
+        /*
+         * If the next one on the list has more credit than current
+         * (or idle, if current is not runnable), choose it.
+         */
+        if ( svc_credit > snext->credit )
             snext = svc;
 
         /* In any case, if we got this far, break. */
@@ -2398,6 +2435,8 @@ csched2_schedule(
          && !is_idle_vcpu(scurr->vcpu)
          && vcpu_runnable(current) )
         __set_bit(__CSFLAG_delayed_runq_add, &scurr->flags);
+
+    __clear_bit(__CSFLAG_vcpu_yield, &scurr->flags);
 
     ret.migrated = 0;
 
@@ -2918,6 +2957,14 @@ csched2_init(struct scheduler *ops)
     printk(XENLOG_INFO "load tracking window lenght %llu ns\n",
            1ULL << opt_load_window_shift);
 
+    if ( opt_yield_bias < CSCHED2_YIELD_BIAS_MIN )
+    {
+        printk("WARNING: %s: opt_yield_bias %d too small, resetting\n",
+               __func__, opt_yield_bias);
+        opt_yield_bias = 1000; /* 1 ms */
+    }
+    printk(XENLOG_INFO "yield bias value %d us\n", opt_yield_bias);
+
     /* Basically no CPU information is available at this point; just
      * set up basic structures, and a callback when the CPU info is
      * available. */
@@ -2970,6 +3017,7 @@ static const struct scheduler sched_credit2_def = {
 
     .sleep          = csched2_vcpu_sleep,
     .wake           = csched2_vcpu_wake,
+    .yield          = csched2_vcpu_yield,
 
     .adjust         = csched2_dom_cntl,
     .adjust_global  = csched2_sys_cntl,

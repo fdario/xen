@@ -1389,6 +1389,16 @@ Choose the default scheduler.
 ### sched\_credit2\_migrate\_resist
 > `= <integer>`
 
+### sched\_credit2\_yield\_bias
+> `= <integer>`
+
+> Default: `1000`
+
+Set how much a yielding vcpu will be penalized, in order to actually
+give a chance to run to some other vcpu. This is basically a bias, in
+favour of the non-yielding vcpus, expressed in microseconds (default
+is 1ms).
+
 ### sched\_credit\_tslice\_ms
 > `= <integer>`
 
