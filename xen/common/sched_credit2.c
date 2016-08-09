@@ -1027,11 +1027,12 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         {
             struct {
                 unsigned vcpu:16, dom:16;
-                unsigned credit;
+                unsigned cpu, credit;
             } d;
             d.dom = cur->vcpu->domain->domain_id;
             d.vcpu = cur->vcpu->vcpu_id;
             d.credit = cur->credit;
+            d.cpu = i;
             __trace_var(TRC_CSCHED2_TICKLE_CHECK, 1,
                         sizeof(d),
                         (unsigned char *)&d);
@@ -1181,12 +1182,13 @@ void burn_credits(struct csched2_runqueue_data *rqd,
     {
         struct {
             unsigned vcpu:16, dom:16;
-            unsigned credit;
+            unsigned credit, cpu;
             int delta;
         } d;
         d.dom = svc->vcpu->domain->domain_id;
         d.vcpu = svc->vcpu->vcpu_id;
         d.credit = svc->credit;
+        d.cpu = svc->vcpu->processor;
         d.delta = delta;
         __trace_var(TRC_CSCHED2_CREDIT_BURN, 1,
                     sizeof(d),

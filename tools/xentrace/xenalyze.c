@@ -7607,24 +7607,27 @@ void sched_process(struct pcpu_info *p)
         case TRC_SCHED_CLASS_EVT(CSCHED2, 3): /* CREDIT_BURN       */
             if(opt.dump_all) {
                 struct {
-                    unsigned int vcpuid:16, domid:16, credit;
+                    unsigned int vcpuid:16, domid:16, credit, cpu;
                     int delta;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:burn_credits d%uv%u, credit = %u, delta = %d\n",
+                printf(" %s csched2:burn_credits d%uv%u, "
+                       "on cpu = %u, credit = %u, delta = %d\n",
                        ri->dump_header, r->domid, r->vcpuid,
-                       r->credit, r->delta);
+                       r->cpu, r->credit, r->delta);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 5): /* TICKLE_CHECK      */
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    unsigned int credit;
+                    unsigned int cpu, credit;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:tickle_check d%uv%u, credit = %u\n",
-                       ri->dump_header, r->domid, r->vcpuid, r->credit);
+                printf(" %s csched2:tickle_check d%uv%u, "
+                       "on cpu = %u, credits = %u\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->cpu, r->credit);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 6): /* TICKLE            */
