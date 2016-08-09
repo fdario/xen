@@ -2730,9 +2730,17 @@ runq_candidate(struct csched2_runqueue_data *rqd,
      * if scurr is yielding, when comparing its credits with other vcpus in
      * the runqueue, act like those other vcpus had yield_bias more credits.
      */
-    int yield_bias = __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags) ?
-                     CSCHED2_YIELD_BIAS : 0;
+    int yield_bias = 0;
     bool_t cpu_in_soft_aff = 1;
+
+    if ( unlikely(is_idle_vcpu(scurr->vcpu)) )
+    {
+        snext = scurr;
+        goto check_runq;
+    }
+
+    if ( __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags) )
+        yield_bias = CSCHED2_YIELD_BIAS;
 
     /*
      * Return the current vcpu if it has executed for less than ratelimit.
@@ -2748,7 +2756,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
      * has been cleared already above.
      */
     if ( !yield_bias &&
-         prv->ratelimit_us && !is_idle_vcpu(scurr->vcpu) &&
+         prv->ratelimit_us &&
          vcpu_runnable(scurr->vcpu) &&
          (now - scurr->vcpu->runstate.state_entry_time) <
           MICROSECS(prv->ratelimit_us) )
@@ -2769,8 +2777,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         return scurr;
     }
 
-    if ( !is_idle_vcpu(scurr->vcpu) &&
-         has_soft_affinity(scurr->vcpu, scurr->vcpu->cpu_hard_affinity) )
+    if ( has_soft_affinity(scurr->vcpu, scurr->vcpu->cpu_hard_affinity) )
     {
         affinity_balance_cpumask(scurr->vcpu, BALANCE_SOFT_AFFINITY,
                                  cpumask_scratch);
@@ -2804,6 +2811,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     else
         snext = CSCHED2_VCPU(idle_vcpu[cpu]);
 
+ check_runq:
     list_for_each( iter, &rqd->runq )
     {
         struct csched2_vcpu * svc = list_entry(iter, struct csched2_vcpu, runq_elem);
