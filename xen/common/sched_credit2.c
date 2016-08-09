@@ -146,6 +146,8 @@
 #define CSCHED2_MIGRATE_RESIST       ((opt_migrate_resist)*MICROSECS(1))
 /* How much to "compensate" a vcpu for L2 migration */
 #define CSCHED2_MIGRATE_COMPENSATION MICROSECS(50)
+/* How tolerant we should be when peeking at runtime of vcpus on other cpus */
+#define CSCHED2_RATELIMIT_TICKLE_TOLERANCE MICROSECS(50)
 /* How big of a bias we should have against a yielding vcpu */
 #define CSCHED2_YIELD_BIAS           ((opt_yield_bias)*MICROSECS(1))
 #define CSCHED2_YIELD_BIAS_MIN       CSCHED2_MIN_TIMER
@@ -972,6 +974,27 @@ static inline bool_t soft_aff_check_preempt(unsigned int bs, unsigned int cpu)
     return !cpumask_test_cpu(cpu, cpumask_scratch);
 }
 
+/*
+ * What we want to know is whether svc, which we assume to be running on some
+ * pcpu, can be interrupted and preempted. So fat, the only reason because of
+ * which a preemption would be deferred is context switch ratelimiting, so
+ * check for that.
+ *
+ * Use a caller provided value of ratelimit, instead of the scheduler's own
+ * prv->ratelimit_us so the caller can play some tricks, if he wants (which,
+ * as a matter of fact, he does, by applying the tolerance).
+ */
+static inline bool_t is_preemptable(const struct csched2_vcpu *svc,
+                                    s_time_t now, s_time_t ratelimit)
+{
+    s_time_t runtime;
+
+    ASSERT(svc->vcpu->is_running);
+    runtime = now - svc->vcpu->runstate.state_entry_time;
+
+    return runtime > ratelimit;
+}
+
 void burn_credits(struct csched2_runqueue_data *rqd, struct csched2_vcpu *, s_time_t);
 
 /*
@@ -997,6 +1020,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     s_time_t lowest = (1<<30);
     unsigned int bs, cpu = new->vcpu->processor;
     struct csched2_runqueue_data *rqd = RQD(ops, cpu);
+    s_time_t ratelimit = MICROSECS(CSCHED2_PRIV(ops)->ratelimit_us) -
+                         CSCHED2_RATELIMIT_TICKLE_TOLERANCE;
     cpumask_t mask, skip_mask;
     struct csched2_vcpu * cur;
 
@@ -1104,7 +1129,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                                 (unsigned char *)&d);
                 }
 
-                if ( cur->credit < new->credit )
+                if ( cur->credit < new->credit &&
+                     is_preemptable(cur, now, ratelimit) )
                 {
                     SCHED_STAT_CRANK(tickled_busy_cpu);
                     ipid = cpu;
@@ -1155,7 +1181,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                                 (unsigned char *)&d);
                 }
 
-                if ( cur->credit < lowest )
+                if ( cur->credit < lowest &&
+                     is_preemptable(cur, now, ratelimit) )
                 {
                     ipid = i;
                     lowest = cur->credit;
