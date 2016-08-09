@@ -997,7 +997,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     s_time_t lowest = (1<<30);
     unsigned int bs, cpu = new->vcpu->processor;
     struct csched2_runqueue_data *rqd = RQD(ops, cpu);
-    cpumask_t mask;
+    cpumask_t mask, skip_mask;
     struct csched2_vcpu * cur;
 
     ASSERT(new->rqd == rqd);
@@ -1016,6 +1016,13 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                     sizeof(d),
                     (unsigned char *)&d);
     }
+
+    /*
+     * Cpus that end up in this mask, have been already checked during the
+     * soft-affinity step, and need not to be checked again when doing hard
+     * affinity.
+     */
+    cpumask_clear(&skip_mask);
 
     for_each_affinity_balance_step( bs )
     {
@@ -1073,7 +1080,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         cpumask_andnot(&mask, &rqd->active, &rqd->idle);
         cpumask_andnot(&mask, &mask, &rqd->tickled);
         cpumask_and(&mask, &mask, cpumask_scratch);
-        if ( cpumask_test_cpu(cpu, &mask) )
+        if ( cpumask_test_cpu(cpu, &mask) &&
+             !cpumask_test_cpu(cpu, &skip_mask) )
         {
             cur = CSCHED2_VCPU(curr_on_cpu(cpu));
 
@@ -1102,13 +1110,26 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                     ipid = cpu;
                     goto tickle;
                 }
+
+                /*
+                 * If we're here, cpu is just not a valid candidate for being
+                 * tickled. Set its bit in skip_mask, to avoid calling
+                 * burn_credits() and check its current vcpu for preemption
+                 * twice.
+                 */
+                __cpumask_set_cpu(cpu, &skip_mask);
             }
         }
 
         for_each_cpu(i, &mask)
         {
-            /* Already looked at this one above */
-            if ( i == cpu )
+            /*
+             * Already looked at these ones above, either because it's the
+             * cpu where new was running before, or because we are at the
+             * hard-affinity step, and we checked this during the
+             * soft-affinity one
+             */
+            if ( i == cpu || cpumask_test_cpu(i, &skip_mask) )
                 continue;
 
             cur = CSCHED2_VCPU(curr_on_cpu(i));
@@ -1139,6 +1160,20 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                     ipid = i;
                     lowest = cur->credit;
                 }
+
+                /*
+                 * No matter if i is the new lowest or not. We've run
+                 * burn_credits() on it, and we've checked it for preemption.
+                 *
+                 * If we are at soft-affinity balancing step, and i is indeed
+                 * the lowest, it will be tickled (and we exit the function).
+                 * If it is not the lowest among the cpus in the soft-affinity
+                 * mask, it can't be the lowest among the cpus in the hard
+                 * affinity mask (assuming we'll actually do the second
+                 * balancing step), as hard-affinity is a superset of soft
+                 * affinity, and therefore we can flag it to be skipped.
+                 */
+                __cpumask_set_cpu(i, &skip_mask);
             }
         }
 
