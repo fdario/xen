@@ -57,6 +57,10 @@
 #define TRC_CSCHED2_SCHEDULE         TRC_SCHED_CLASS_EVT(CSCHED2, 21)
 #define TRC_CSCHED2_RATELIMIT        TRC_SCHED_CLASS_EVT(CSCHED2, 22)
 #define TRC_CSCHED2_RUNQ_CAND_CHECK  TRC_SCHED_CLASS_EVT(CSCHED2, 23)
+#define TRC_CSCHED2_VCPU_GET_BUDGET  TRC_SCHED_CLASS_EVT(CSCHED2, 24)
+#define TRC_CSCHED2_PARK_VCPU        TRC_SCHED_CLASS_EVT(CSCHED2, 25)
+#define TRC_CSCHED2_UNPARK_VCPU      TRC_SCHED_CLASS_EVT(CSCHED2, 26)
+#define TRC_CSCHED2_REPL_BUDGET      TRC_SCHED_CLASS_EVT(CSCHED2, 27)
 
 /*
  * WARNING: This is still in an experimental phase.  Status and work can be found at the
@@ -89,6 +93,12 @@
  * Credits are "reset" when the next vcpu in the runqueue is less than
  * or equal to zero.  At that point, everyone's credits are "clipped"
  * to a small value, and a fixed credit is added to everyone.
+ */
+
+/*
+ * Utilization cap:
+ *
+ * XXX
  */
 
 /*
@@ -164,6 +174,8 @@
 #define CSCHED2_CREDIT_RESET         0
 /* Max timer: Maximum time a guest can be run for. */
 #define CSCHED2_MAX_TIMER            CSCHED2_CREDIT_INIT
+/* XXX */
+#define CSCHED2_BDGT_REPL_PERIOD     ((opt_budget_period)*MICROSECS(1))
 
 /*
  * Flags
@@ -294,6 +306,10 @@ integer_param("credit2_balance_under", opt_underload_balance_tolerance);
 static int __read_mostly opt_overload_balance_tolerance = -3;
 integer_param("credit2_balance_over", opt_overload_balance_tolerance);
 
+/* XXX */
+static unsigned int __read_mostly opt_budget_period = 10000; /* 10 ms */
+integer_param("credit2_budget_period_us", opt_budget_period); //XXX nome del parametro....
+
 /*
  * Runqueue organization.
  *
@@ -407,6 +423,10 @@ struct csched2_vcpu {
     unsigned int residual;
 
     int credit;
+
+    s_time_t budget;
+    struct list_head parked_elem;      /* XXX On the ... */
+
     s_time_t start_time; /* When we were scheduled (used for credit) */
     unsigned flags;      /* 16 bits doesn't seem to play well with clear_bit() */
     int tickled_cpu;     /* cpu tickled for picking us up (-1 if none) */
@@ -424,7 +444,15 @@ struct csched2_vcpu {
 struct csched2_dom {
     struct list_head sdom_elem;
     struct domain *dom;
+
+    s_time_t budget, tot_budget;
+    struct timer repl_timer;
+    s_time_t repl_amount, repl_time;
+    spinlock_t budget_lock;
+    struct list_head parked_vcpus;
+
     uint16_t weight;
+    uint16_t cap;
     uint16_t nr_vcpus;
 };
 
@@ -1227,6 +1255,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         burn_credits(rqd, cur, now);
 
         if ( cur->credit < new->credit )
+        //XXX e budget???
         {
             SCHED_STAT_CRANK(tickled_busy_cpu);
             ipid = cpu;
@@ -1252,6 +1281,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         burn_credits(rqd, cur, now);
 
         if ( cur->credit < lowest )
+        //XXX e budget???
         {
             ipid = i;
             lowest = cur->credit;
@@ -1353,7 +1383,12 @@ static void reset_credit(const struct scheduler *ops, int cpu, s_time_t now,
          * that the credit it has spent so far get accounted.
          */
         if ( svc->vcpu == curr_on_cpu(svc_cpu) )
+        {
             burn_credits(rqd, svc, now);
+
+            if ( unlikely(svc->budget <= 0) )
+                tickle_cpu(svc_cpu, rqd);
+        }
 
         start_credit = svc->credit;
 
@@ -1409,33 +1444,211 @@ void burn_credits(struct csched2_runqueue_data *rqd,
 
     delta = now - svc->start_time;
 
-    if ( likely(delta > 0) )
+    if ( unlikely(delta <= 0) )
     {
-        SCHED_STAT_CRANK(burn_credits_t2c);
-        t2c_update(rqd, delta, svc);
-        svc->start_time = now;
-    }
-    else if ( delta < 0 )
-    {
-        d2printk("WARNING: %s: Time went backwards? now %"PRI_stime" start_time %"PRI_stime"\n",
-                 __func__, now, svc->start_time);
+        if ( unlikely(delta < 0) )
+            d2printk("WARNING: %s: Time went backwards? now %"PRI_stime
+                     " start_time %"PRI_stime"\n", __func__, now,
+                     svc->start_time);
+        goto out;
     }
 
+    SCHED_STAT_CRANK(burn_credits_t2c);
+    t2c_update(rqd, delta, svc);
+
+    if ( unlikely(svc->budget != STIME_MAX) )
+        svc->budget -= delta;
+
+    svc->start_time = now;
+
+ out:
     if ( unlikely(tb_init_done) )
     {
         struct {
             unsigned vcpu:16, dom:16;
-            int credit, delta;
+            int credit, budget;
+            int delta;
         } d;
         d.dom = svc->vcpu->domain->domain_id;
         d.vcpu = svc->vcpu->vcpu_id;
         d.credit = svc->credit;
+        d.budget = svc->budget;
         d.delta = delta;
         __trace_var(TRC_CSCHED2_CREDIT_BURN, 1,
                     sizeof(d),
                     (unsigned char *)&d);
     }
 }
+
+/*
+ * Budget-related code.
+ */
+
+static void __park_vcpu(struct csched2_vcpu *svc)
+{
+    struct vcpu *v = svc->vcpu;
+
+    ASSERT(spin_is_locked(&svc->sdom->budget_lock));
+
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            unsigned vcpu:16, dom:16;
+        } d;
+        d.dom = svc->vcpu->domain->domain_id;
+        d.vcpu = svc->vcpu->vcpu_id;
+        __trace_var(TRC_CSCHED2_PARK_VCPU, 1,
+                    sizeof(d),
+                    (unsigned char *)&d);
+    }
+
+    //XXX se scheduled, lo leva lo scheduler dopo
+    if ( vcpu_on_runq(svc) )
+    {
+        runq_remove(svc);
+        update_load(svc->sdom->dom->cpupool->sched, svc->rqd, svc, -1, NOW());
+    }
+
+    __set_bit(_VPF_parked, &v->pause_flags);
+    list_add(&svc->parked_elem, &svc->sdom->parked_vcpus);
+}
+
+static bool vcpu_try_get_budget(struct csched2_vcpu *svc, bool do_park)
+{
+    struct csched2_dom *sdom = svc->sdom;
+
+    ASSERT(spin_is_locked(per_cpu(schedule_data, svc->vcpu->processor).schedule_lock));
+
+    if ( svc->budget > 0 )
+        return true;
+
+    spin_lock(&sdom->budget_lock); //XXX nests inside rq_lock !!!
+
+    // XXX Take overrun into account (in fact svc->budget is negative here!)
+    sdom->budget += svc->budget;
+    svc->budget = 0;
+
+    if ( sdom->budget > 0 )
+    {
+        svc->budget = sdom->budget;
+        sdom->budget = 0;
+
+        if ( unlikely(tb_init_done) )
+        {
+            struct {
+                unsigned vcpu:16, dom:16;
+                int vcpu_budget, dom_budget; //XXX int ???
+            } d;
+            d.dom = svc->vcpu->domain->domain_id;
+            d.vcpu = svc->vcpu->vcpu_id;
+            d.vcpu_budget = svc->budget; //XXX convertire ???
+            d.dom_budget = sdom->budget;
+            __trace_var(TRC_CSCHED2_VCPU_GET_BUDGET, 1,
+                        sizeof(d),
+                        (unsigned char *)&d);
+        }
+
+        goto out;
+    }
+
+    ASSERT(svc->budget <= 0);
+    if ( do_park )
+        __park_vcpu(svc);
+ out:
+    spin_unlock(&sdom->budget_lock);
+
+    return svc->budget > 0;
+}
+
+static void unpark_parked_vcpus(const struct scheduler *ops, struct list_head *vcpus)
+{
+    struct csched2_vcpu *svc, *tmp;
+    spinlock_t *lock;
+
+    list_for_each_entry_safe(svc, tmp, vcpus, parked_elem)
+    {
+        unsigned long flags;
+        s_time_t now;
+
+        lock = vcpu_schedule_lock_irqsave(svc->vcpu, &flags);
+
+        __clear_bit(_VPF_parked, &svc->vcpu->pause_flags);
+
+        if ( unlikely(tb_init_done) )
+        {
+            struct {
+                unsigned vcpu:16, dom:16;
+            } d;
+            d.dom = svc->vcpu->domain->domain_id;
+            d.vcpu = svc->vcpu->vcpu_id;
+            __trace_var(TRC_CSCHED2_UNPARK_VCPU, 1,
+                        sizeof(d),
+                        (unsigned char *)&d);
+        }
+
+        if ( unlikely(svc->flags & CSFLAG_scheduled) )
+        {
+            //XXX replenishment arrived between schedule() and context_saved()! Let's go back compete for it!!
+            ASSERT( svc->rqd != NULL );
+            ASSERT( c2rqd(ops, svc->vcpu->processor) == svc->rqd );
+            __set_bit(__CSFLAG_delayed_runq_add, &svc->flags);
+        }
+        else if ( vcpu_runnable(svc->vcpu) )
+        {
+            /* XXX Put the VCPU on the runq */
+            now = NOW();
+            update_load(ops, svc->rqd, svc, 1, now);
+            runq_insert(ops, svc);
+            runq_tickle(ops, svc, now);
+        }
+
+        list_del_init(&svc->parked_elem);
+
+        vcpu_schedule_unlock_irqrestore(lock, flags, svc->vcpu);
+    }
+}
+
+static void repl_sdom_budget(void* data)
+{
+    struct csched2_dom *sdom = data;
+    s_time_t now = NOW();
+    unsigned long flags;
+    LIST_HEAD(parked);
+
+    spin_lock_irqsave(&sdom->budget_lock, flags);
+
+    //XXX
+    while ( sdom->repl_time <= now || sdom->budget <= 0 )
+    {
+        sdom->repl_time += CSCHED2_BDGT_REPL_PERIOD;
+        sdom->budget += sdom->repl_amount;
+    }
+    sdom->budget = sdom->budget > sdom->tot_budget ?
+                   sdom->tot_budget : sdom->budget;
+
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            unsigned dom;
+            int budget;
+        } d;
+        d.dom = sdom->dom->domain_id;
+        d.budget = sdom->budget;
+        __trace_var(TRC_CSCHED2_REPL_BUDGET, 1,
+                    sizeof(d),
+                    (unsigned char *)&d);
+    }
+
+    list_splice_init(&sdom->parked_vcpus, &parked);
+
+    spin_unlock_irqrestore(&sdom->budget_lock, flags);
+
+    unpark_parked_vcpus(sdom->dom->cpupool->sched, &parked);
+
+    set_timer(&sdom->repl_timer, sdom->repl_time);
+}
+
+
 
 #ifndef NDEBUG
 static inline void
@@ -1496,6 +1709,9 @@ csched2_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     }
     svc->tickled_cpu = -1;
 
+    svc->budget = STIME_MAX;
+    INIT_LIST_HEAD(&svc->parked_elem);
+
     SCHED_STAT_CRANK(vcpu_alloc);
 
     return svc;
@@ -1550,6 +1766,7 @@ csched2_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
         SCHED_STAT_CRANK(vcpu_wake_runnable);
     else
         SCHED_STAT_CRANK(vcpu_wake_not_runnable);
+//XXX ???
 
     /* If the context hasn't been saved for this vcpu yet, we can't put it on
      * another runqueue.  Instead, we set a flag so that it will be put on the runqueue
@@ -1592,12 +1809,27 @@ csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
     struct csched2_vcpu * const svc = csched2_vcpu(vc);
     spinlock_t *lock = vcpu_schedule_lock_irq(vc);
     s_time_t now = NOW();
+    LIST_HEAD(were_parked);
 
     BUG_ON( !is_idle_vcpu(vc) && svc->rqd != c2rqd(ops, vc->processor));
     ASSERT(is_idle_vcpu(vc) || svc->rqd == c2rqd(ops, vc->processor));
 
     /* This vcpu is now eligible to be put on the runqueue again */
     __clear_bit(__CSFLAG_scheduled, &svc->flags);
+
+    if ( unlikely(svc->budget != STIME_MAX && svc->budget > 0) )
+        //vcpu_give_back_budget(svc, &were_parked)
+    {
+        struct csched2_dom *sdom = svc->sdom;
+
+        spin_lock(&sdom->budget_lock);
+        //XXX give back leftover budget, if any, and let other vcpus compete for it
+        sdom->budget += svc->budget;
+        svc->budget = 0;
+        if ( sdom->budget > 0 )
+            list_splice_init(&sdom->parked_vcpus, &were_parked);
+        spin_unlock(&sdom->budget_lock);
+    }
 
     /* If someone wants it on the runqueue, put it there. */
     /*
@@ -1619,6 +1851,9 @@ csched2_context_saved(const struct scheduler *ops, struct vcpu *vc)
         update_load(ops, svc->rqd, svc, -1, now);
 
     vcpu_schedule_unlock_irq(lock, vc);
+
+    if ( !list_empty(&were_parked) )
+        unpark_parked_vcpus(ops, &were_parked);
 }
 
 #define MAX_LOAD (STIME_MAX);
@@ -2139,6 +2374,7 @@ csched2_dom_cntl(
     struct csched2_dom * const sdom = csched2_dom(d);
     struct csched2_private *prv = csched2_priv(ops);
     unsigned long flags;
+    struct vcpu *v;
     int rc = 0;
 
     /*
@@ -2153,15 +2389,15 @@ csched2_dom_cntl(
     case XEN_DOMCTL_SCHEDOP_getinfo:
         read_lock_irqsave(&prv->lock, flags);
         op->u.credit2.weight = sdom->weight;
+        op->u.credit2.cap = sdom->cap;
         read_unlock_irqrestore(&prv->lock, flags);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
+        write_lock_irqsave(&prv->lock, flags);
+
         if ( op->u.credit2.weight != 0 )
         {
-            struct vcpu *v;
             int old_weight;
-
-            write_lock_irqsave(&prv->lock, flags);
 
             old_weight = sdom->weight;
 
@@ -2180,9 +2416,71 @@ csched2_dom_cntl(
 
                 vcpu_schedule_unlock(lock, svc->vcpu);
             }
-
-            write_unlock_irqrestore(&prv->lock, flags);
         }
+
+        /* Cap. */
+        if ( op->u.credit2.cap != 0 )
+        {
+            sdom->tot_budget = (CSCHED2_BDGT_REPL_PERIOD / 100) * op->u.credit2.cap;
+            sdom->repl_amount = sdom->tot_budget;
+            if ( sdom->cap == 0 )
+            {
+                s_time_t now = NOW();
+
+                /* XXX */
+                for_each_vcpu ( d, v )
+                {
+                    struct csched2_vcpu *svc = csched2_vcpu(v);
+                    spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
+
+                    //if ( svc->flags & CSFLAG_scheduled ) ???
+                    if ( v->is_running )
+                    {
+                        unsigned int cpu = v->processor;
+                        struct csched2_runqueue_data *rqd = c2rqd(ops, cpu);
+
+                        ASSERT(curr_on_cpu(cpu) == v);
+
+                        /* XXX burn now to avoid accounting budget go too negative! */
+                        burn_credits(rqd, svc, now);
+                        __cpumask_set_cpu(cpu, &rqd->tickled);
+                        ASSERT(!cpumask_test_cpu(cpu, &rqd->smt_idle));
+                        cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+                    }
+                    svc->budget = 0;
+
+                    vcpu_schedule_unlock(lock, svc->vcpu);
+                }
+
+                sdom->budget = sdom->repl_amount; //XXX lock???
+                sdom->repl_time = now + CSCHED2_BDGT_REPL_PERIOD;
+                set_timer(&sdom->repl_timer, sdom->repl_time);
+            }
+            sdom->cap = op->u.credit2.cap;
+        }
+        else if ( sdom->cap != 0 )
+        {
+            stop_timer(&sdom->repl_timer);
+
+            /* XXX */
+            for_each_vcpu ( d, v )
+            {
+                struct csched2_vcpu *svc = csched2_vcpu(v);
+                spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
+
+                // XXX Safe unlocked?
+                svc->budget = STIME_MAX;
+
+                vcpu_schedule_unlock(lock, svc->vcpu);
+            }
+
+            sdom->cap = 0;
+
+            // XXX safe without budget_lock because sto cambiano i parametri
+            unpark_parked_vcpus(ops, &sdom->parked_vcpus);
+        }
+
+        write_unlock_irqrestore(&prv->lock, flags);
         break;
     default:
         rc = -EINVAL;
@@ -2236,11 +2534,18 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     if ( sdom == NULL )
         return NULL;
 
-    /* Initialize credit and weight */
+    /* Initialize credit, cap and weight */
     INIT_LIST_HEAD(&sdom->sdom_elem);
     sdom->dom = dom;
     sdom->weight = CSCHED2_DEFAULT_WEIGHT;
+    sdom->cap = 0U;
     sdom->nr_vcpus = 0;
+
+    init_timer(&sdom->repl_timer, repl_sdom_budget, (void*) sdom,
+               cpumask_any(cpupool_domain_cpumask(dom)));
+    sdom->budget = sdom->repl_amount = 0;
+    spin_lock_init(&sdom->budget_lock);
+    INIT_LIST_HEAD(&sdom->parked_vcpus);
 
     write_lock_irqsave(&prv->lock, flags);
 
@@ -2277,6 +2582,7 @@ csched2_free_domdata(const struct scheduler *ops, void *data)
 
     write_lock_irqsave(&prv->lock, flags);
 
+    kill_timer(&sdom->repl_timer);
     list_del_init(&sdom->sdom_elem);
 
     write_unlock_irqrestore(&prv->lock, flags);
@@ -2353,7 +2659,7 @@ csched2_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
 }
 
 /* How long should we let this vcpu run for? */
-static s_time_t
+static noinline s_time_t
 csched2_runtime(const struct scheduler *ops, int cpu,
                 struct csched2_vcpu *snext, s_time_t now)
 {
@@ -2371,11 +2677,12 @@ csched2_runtime(const struct scheduler *ops, int cpu,
         return -1;
 
     /* General algorithm:
-     * 1) Run until snext's credit will be 0
+     * 1) Run until snext's credit will be 0.
      * 2) But if someone is waiting, run until snext's credit is equal
-     * to his
-     * 3) But never run longer than MAX_TIMER or shorter than MIN_TIMER or
-     * the ratelimit time.
+     *    to his.
+     * 3) But, if we are capped, never run more than our budget.
+     * 4) But never run longer than MAX_TIMER or shorter than MIN_TIMER or
+     *    the ratelimit time.
      */
 
     /* Calculate mintime */
@@ -2390,11 +2697,13 @@ csched2_runtime(const struct scheduler *ops, int cpu,
             min_time = ratelimit_min;
     }
 
-    /* 1) Basic time: Run until credit is 0. */
+    /* 1) Run until snext's credit will be 0. */
     rt_credit = snext->credit;
 
-    /* 2) If there's someone waiting whose credit is positive,
-     * run until your credit ~= his */
+    /*
+     * 2) If there's someone waiting whose credit is positive,
+     *    run until your credit ~= his.
+     */
     if ( ! list_empty(runq) )
     {
         struct csched2_vcpu *swait = runq_elem(runq->next);
@@ -2405,6 +2714,7 @@ csched2_runtime(const struct scheduler *ops, int cpu,
             rt_credit = snext->credit - swait->credit;
         }
     }
+    // And what about his budget?
 
     /*
      * The next guy on the runqueue may actually have a higher credit,
@@ -2416,14 +2726,22 @@ csched2_runtime(const struct scheduler *ops, int cpu,
      * credit values of MIN,MAX per vcpu, since each vcpu burns credit
      * at a different rate.
      */
-    if (rt_credit > 0)
+    if ( rt_credit > 0 )
         time = c2t(rqd, rt_credit, snext);
     else
         time = 0;
 
-    /* 3) But never run longer than MAX_TIMER or less than MIN_TIMER or
-     * the rate_limit time. */
-    if ( time < min_time)
+    /*
+     * 3) But, if capped, never run more than our budget.
+     */
+    if ( unlikely(snext->budget != STIME_MAX) )
+        time = snext->budget < time ? snext->budget : time;
+
+    /*
+     * 4) But never run longer than MAX_TIMER or less than MIN_TIMER or
+     *    the rate_limit time.
+     */
+    if ( time < min_time )
     {
         time = min_time;
         SCHED_STAT_CRANK(runtime_min_timer);
@@ -2440,13 +2758,13 @@ csched2_runtime(const struct scheduler *ops, int cpu,
 /*
  * Find a candidate.
  */
-static struct csched2_vcpu *
+static noinline struct csched2_vcpu *
 runq_candidate(struct csched2_runqueue_data *rqd,
                struct csched2_vcpu *scurr,
                int cpu, s_time_t now,
                unsigned int *skipped)
 {
-    struct list_head *iter;
+    struct list_head *iter, *temp;
     struct csched2_vcpu *snext = NULL;
     struct csched2_private *prv = csched2_priv(per_cpu(scheduler, cpu));
     bool yield = __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags);
@@ -2489,7 +2807,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     else
         snext = csched2_vcpu(idle_vcpu[cpu]);
 
-    list_for_each( iter, &rqd->runq )
+    list_for_each_safe( iter, temp, &rqd->runq )
     {
         struct csched2_vcpu * svc = list_entry(iter, struct csched2_vcpu, runq_elem);
 
@@ -2542,7 +2860,14 @@ runq_candidate(struct csched2_runqueue_data *rqd,
          * yielding, choose it.
          */
         if ( yield || svc->credit > snext->credit )
+        {
+            /* XXX */
+            if ( unlikely(svc->budget != STIME_MAX &&
+                          !vcpu_try_get_budget(svc, true)) ) // /* don't park */ false)) )
+                continue;
+
             snext = svc;
+        }
 
         /* In any case, if we got this far, break. */
         break;
@@ -2567,6 +2892,13 @@ runq_candidate(struct csched2_runqueue_data *rqd,
 
     if ( unlikely(snext->tickled_cpu != -1 && snext->tickled_cpu != cpu) )
         SCHED_STAT_CRANK(tickled_cpu_overridden);
+
+    /*
+     * If snext is from a capped domain, it must have budget (or it
+     * wouldn't have been in the runq). If it is not, it'd be STIME_MAX,
+     * which still is >= 0.
+     */
+    ASSERT(snext->budget >= 0);
 
     return snext;
 }
@@ -2625,8 +2957,16 @@ csched2_schedule(
                     (unsigned char *)&d);
     }
 
-    /* Update credits */
+    /* Update credits (and budget, if necessary). */
     burn_credits(rqd, scurr, now);
+
+    /*
+     *  Below 0 means: (1) we are capped; (2) we have overrun our  budget.
+     *  Let's try to get more. If we can't (e.g., other vcpus are using it
+     *  all already), we will be parked.
+     */
+    if ( unlikely(scurr->budget <= 0) )
+        vcpu_try_get_budget(scurr, /* park! */ true);
 
     /*
      * Select next runnable local VCPU (ie top of local runq).
@@ -2762,6 +3102,8 @@ csched2_dump_vcpu(struct csched2_private *prv, struct csched2_vcpu *svc)
 
     printk(" credit=%" PRIi32" [w=%u]", svc->credit, svc->weight);
 
+    printk(" budget=%" PRI_stime, svc->budget);
+
     printk(" load=%"PRI_stime" (~%"PRI_stime"%%)", svc->avgload,
            (svc->avgload * 100) >> prv->load_precision_shift);
 
@@ -2847,9 +3189,10 @@ csched2_dump(const struct scheduler *ops)
 
         sdom = list_entry(iter_sdom, struct csched2_dom, sdom_elem);
 
-        printk("\tDomain: %d w %d v %d\n",
+        printk("\tDomain: %d w %d c %u v %d\n",
                sdom->dom->domain_id,
                sdom->weight,
+               sdom->cap,
                sdom->nr_vcpus);
 
         for_each_vcpu( sdom->dom, v )
@@ -3062,12 +3405,14 @@ csched2_init(struct scheduler *ops)
            XENLOG_INFO " load_window_shift: %d\n"
            XENLOG_INFO " underload_balance_tolerance: %d\n"
            XENLOG_INFO " overload_balance_tolerance: %d\n"
-           XENLOG_INFO " runqueues arrangement: %s\n",
+           XENLOG_INFO " runqueues arrangement: %s\n"
+           XENLOG_INFO " cap enforcement granularity: %dus\n",
            opt_load_precision_shift,
            opt_load_window_shift,
            opt_underload_balance_tolerance,
            opt_overload_balance_tolerance,
-           opt_runqueue_str[opt_runqueue]);
+           opt_runqueue_str[opt_runqueue],
+           opt_budget_period);
 
     if ( opt_load_precision_shift < LOADAVG_PRECISION_SHIFT_MIN )
     {
@@ -3084,6 +3429,13 @@ csched2_init(struct scheduler *ops)
     }
     printk(XENLOG_INFO "load tracking window length %llu ns\n",
            1ULL << opt_load_window_shift);
+
+    if ( CSCHED2_BDGT_REPL_PERIOD < CSCHED2_MIN_TIMER )
+    {
+        printk("WARNING: %s: opt_budget_period %d too small, resetting\n",
+               __func__, opt_budget_period);
+        opt_budget_period = 10000; /* 10 ms */
+    }
 
     /* Basically no CPU information is available at this point; just
      * set up basic structures, and a callback when the CPU info is

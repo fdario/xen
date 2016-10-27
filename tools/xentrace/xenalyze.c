@@ -7669,12 +7669,12 @@ void sched_process(struct pcpu_info *p)
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    int credit, delta;
+                    int credit, budget, delta;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:burn_credits d%uv%u, credit = %d, delta = %d\n",
+                printf(" %s csched2:burn_credits d%uv%u, credit = %d, budget= %d, delta = %d\n",
                        ri->dump_header, r->domid, r->vcpuid,
-                       r->credit, r->delta);
+                       r->credit, r->budget, r->delta);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 5): /* TICKLE_CHECK      */

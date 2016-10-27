@@ -8,6 +8,7 @@
 #ifndef __XEN_SCHED_IF_H__
 #define __XEN_SCHED_IF_H__
 
+#include <xen/kernel.h>
 #include <xen/percpu.h>
 
 /* A global pointer to the initial cpupool (POOL0). */
