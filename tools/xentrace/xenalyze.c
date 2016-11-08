@@ -7892,6 +7892,44 @@ void sched_process(struct pcpu_info *p)
                        ri->dump_header, r->domid, r->vcpuid);
             }
             break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 24): /* VCPU_GET_BUDGET  */
+            if (opt.dump_all) {
+                struct {
+                    unsigned int vcpuid:16, domid:16;
+                    int vcpu_budget, dom_budget;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched2:get budget d%uv%u budget=%d (d%u budget=%d)\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->vcpu_budget, r->domid, r->dom_budget);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 25): /* PARK_VCPU        */
+            if (opt.dump_all) {
+                printf(" %s csched2:parking\n", ri->dump_header);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 26): /* UNPARK_VCPU      */
+            if (opt.dump_all) {
+                struct {
+                    unsigned int vcpuid:16, domid:16;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched2:unparking d%uv%u\n",
+                       ri->dump_header, r->domid, r->vcpuid);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 27): /* REPL_BUDGET      */
+            if (opt.dump_all) {
+                struct {
+                    unsigned int domid;
+                    int budget;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched2:replenishing d%u, budget=%d\n",
+                       ri->dump_header, r->domid, r->budget);
+            }
+            break;
         /* RTDS (TRC_RTDS_xxx) */
         case TRC_SCHED_CLASS_EVT(RTDS, 1): /* TICKLE           */
             if(opt.dump_all) {
