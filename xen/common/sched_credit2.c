@@ -1165,7 +1165,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     {
         struct {
             unsigned vcpu:16, dom:16;
-            unsigned processor, credit;
+            unsigned processor;
+            int credit;
         } d;
         d.dom = new->vcpu->domain->domain_id;
         d.vcpu = new->vcpu->vcpu_id;
@@ -1264,7 +1265,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         {
             struct {
                 unsigned vcpu:16, dom:16;
-                unsigned credit;
+                int credit;
             } d;
             d.dom = cur->vcpu->domain->domain_id;
             d.vcpu = cur->vcpu->vcpu_id;
@@ -1378,7 +1379,7 @@ static void reset_credit(const struct scheduler *ops, int cpu, s_time_t now,
         {
             struct {
                 unsigned vcpu:16, dom:16;
-                unsigned credit_start, credit_end;
+                int credit_start, credit_end;
                 unsigned multiplier;
             } d;
             d.dom = svc->vcpu->domain->domain_id;
@@ -1428,8 +1429,7 @@ void burn_credits(struct csched2_runqueue_data *rqd,
     {
         struct {
             unsigned vcpu:16, dom:16;
-            unsigned credit;
-            int delta;
+            int credit, delta;
         } d;
         d.dom = svc->vcpu->domain->domain_id;
         d.vcpu = svc->vcpu->vcpu_id;
