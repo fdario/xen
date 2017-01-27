@@ -172,6 +172,7 @@ struct csched_pcpu {
     struct timer ticker;
     unsigned int tick;
     unsigned int idle_bias;
+    unsigned int nr_runnable;
 };
 
 /*
@@ -262,9 +263,26 @@ static inline bool_t is_runq_idle(unsigned int cpu)
 }
 
 static inline void
+inc_nr_runnable(unsigned int cpu)
+{
+    ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
+    CSCHED_PCPU(cpu)->nr_runnable++;
+
+}
+
+static inline void
+dec_nr_runnable(unsigned int cpu)
+{
+    ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
+    CSCHED_PCPU(cpu)->nr_runnable--;
+    ASSERT(CSCHED_PCPU(cpu)->nr_runnable >= 0);
+}
+
+static inline void
 __runq_insert(struct csched_vcpu *svc)
 {
-    const struct list_head * const runq = RUNQ(svc->vcpu->processor);
+    unsigned int cpu = svc->vcpu->processor;
+    const struct list_head * const runq = RUNQ(cpu);
     struct list_head *iter;
 
     BUG_ON( __vcpu_on_runq(svc) );
@@ -601,6 +619,7 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     /* Start off idling... */
     BUG_ON(!is_idle_vcpu(curr_on_cpu(cpu)));
     cpumask_set_cpu(cpu, prv->idlers);
+    spc->nr_runnable = 0;
 }
 
 static void
@@ -1042,7 +1061,10 @@ csched_vcpu_insert(const struct scheduler *ops, struct vcpu *vc)
     lock = vcpu_schedule_lock_irq(vc);
 
     if ( !__vcpu_on_runq(svc) && vcpu_runnable(vc) && !vc->is_running )
+    {
         __runq_insert(svc);
+        inc_nr_runnable(vc->processor);
+    }
 
     vcpu_schedule_unlock_irq(lock, vc);
 
@@ -1102,7 +1124,10 @@ csched_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
         cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
     }
     else if ( __vcpu_on_runq(svc) )
+    {
+        dec_nr_runnable(cpu);
         __runq_remove(svc);
+    }
 }
 
 static void
@@ -1163,6 +1188,7 @@ csched_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
 
     /* Put the VCPU on the runq and tickle CPUs */
     __runq_insert(svc);
+    inc_nr_runnable(vc->processor);
     __runq_tickle(svc);
 }
 
@@ -1664,8 +1690,10 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
             SCHED_VCPU_STAT_CRANK(speer, migrate_q);
             SCHED_STAT_CRANK(migrate_queued);
             WARN_ON(vc->is_urgent);
+            dec_nr_runnable(peer_cpu);
             __runq_remove(speer);
             vc->processor = cpu;
+            inc_nr_runnable(cpu);
             return speer;
         }
     }
@@ -1721,7 +1749,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
         peer_node = node;
         do
         {
-            /* Find out what the !idle are in this node */
+            /* Select the pCPUs in this node that have work we can steal. */
             cpumask_andnot(&workers, online, prv->idlers);
             cpumask_and(&workers, &workers, &node_to_cpumask(peer_node));
             __cpumask_clear_cpu(cpu, &workers);
@@ -1731,6 +1759,40 @@ csched_load_balance(struct csched_private *prv, int cpu,
                 goto next_node;
             do
             {
+                spinlock_t *lock;
+
+                /*
+                 * If there is only one runnable vCPU on peer_cpu, it means
+                 * there's no one to be stolen in its runqueue, so skip it.
+                 *
+                 * Checking this without holding the lock is racy... But that's
+                 * the whole point of this optimization!
+                 *
+                 * In more details:
+                 * - if we race with dec_nr_runnable(), we may try to take the
+                 *   lock and call csched_runq_steal() for no reason. This is
+                 *   not a functional issue, and should be infrequent enough.
+                 *   And we can avoid that by re-checking nr_runnable after
+                 *   having grabbed the lock, if we want;
+                 * - if we race with inc_nr_runnable(), we skip a pCPU that may
+                 *   have runnable vCPUs in its runqueue, but that's not a
+                 *   problem because:
+                 *   + if racing with csched_vcpu_insert() or csched_vcpu_wake(),
+                 *     __runq_tickle() will be called afterwords, so the vCPU
+                 *     won't get stuck in the runqueue for too long;
+                 *   + if racing with csched_runq_steal(), it may be that a
+                 *     vCPU that we could have picked up, stays in a runqueue
+                 *     until someone else tries to steal it again. But this is
+                 *     no worse than what can happen already (without this
+                 *     optimization), it the pCPU would schedule right after we
+                 *     have taken the lock, and hence block on it.
+                 */
+                if ( CSCHED_PCPU(peer_cpu)->nr_runnable <= 1 )
+                {
+                    TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* skipp'n */ 0);
+                    goto next_cpu;
+                }
+
                 /*
                  * Get ahold of the scheduler lock for this peer CPU.
                  *
@@ -1738,14 +1800,13 @@ csched_load_balance(struct csched_private *prv, int cpu,
                  * could cause a deadlock if the peer CPU is also load
                  * balancing and trying to lock this CPU.
                  */
-                spinlock_t *lock = pcpu_schedule_trylock(peer_cpu);
+                lock = pcpu_schedule_trylock(peer_cpu);
                 SCHED_STAT_CRANK(steal_trylock);
                 if ( !lock )
                 {
                     SCHED_STAT_CRANK(steal_trylock_failed);
                     TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* skipp'n */ 0);
-                    peer_cpu = cpumask_cycle(peer_cpu, &workers);
-                    continue;
+                    goto next_cpu;
                 }
 
                 TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* checked */ 1);
@@ -1762,6 +1823,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
                     return speer;
                 }
 
+ next_cpu:
                 peer_cpu = cpumask_cycle(peer_cpu, &workers);
 
             } while( peer_cpu != cpumask_first(&workers) );
@@ -1892,7 +1954,10 @@ csched_schedule(
     if ( vcpu_runnable(current) )
         __runq_insert(scurr);
     else
+    {
         BUG_ON( is_idle_vcpu(current) || list_empty(runq) );
+        dec_nr_runnable(cpu);
+    }
 
     snext = __runq_elem(runq->next);
     ret.migrated = 0;
@@ -2009,7 +2074,8 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     runq = &spc->runq;
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk("CPU[%02d] sort=%d, sibling=%s, ", cpu, spc->runq_sort_last, cpustr);
+    printk("CPU[%02d] nr_run=%d, sort=%d, sibling=%s, ",
+           cpu, spc->nr_runnable, spc->runq_sort_last, cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
     printk("core=%s\n", cpustr);
 
