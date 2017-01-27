@@ -171,6 +171,7 @@ struct csched_pcpu {
     struct timer ticker;
     unsigned int tick;
     unsigned int idle_bias;
+    unsigned int nr_runnable;
 };
 
 /*
@@ -221,6 +222,7 @@ struct csched_private {
     uint32_t ncpus;
     struct timer  master_ticker;
     unsigned int master;
+    cpumask_var_t overloaded;
     cpumask_var_t idlers;
     cpumask_var_t cpus;
     uint32_t weight;
@@ -263,7 +265,10 @@ static inline bool_t is_runq_idle(unsigned int cpu)
 static inline void
 __runq_insert(struct csched_vcpu *svc)
 {
-    const struct list_head * const runq = RUNQ(svc->vcpu->processor);
+    unsigned int cpu = svc->vcpu->processor;
+    const struct list_head * const runq = RUNQ(cpu);
+    struct csched_private * const prv = CSCHED_PRIV(per_cpu(scheduler, cpu));
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
     struct list_head *iter;
 
     BUG_ON( __vcpu_on_runq(svc) );
@@ -288,12 +293,37 @@ __runq_insert(struct csched_vcpu *svc)
     }
 
     list_add_tail(&svc->runq_elem, iter);
+
+    /*
+     * If there is more than just the idle vCPU and a "regular" vCPU runnable
+     * on the runqueue of this pCPU, mark it as overloaded (so other pCPU
+     * can come and pick up some work).
+     */
+    if ( ++spc->nr_runnable > 2 &&
+         !cpumask_test_cpu(cpu, prv->overloaded) )
+        cpumask_set_cpu(cpu, prv->overloaded);
 }
 
 static inline void
 __runq_remove(struct csched_vcpu *svc)
 {
+    unsigned int cpu = svc->vcpu->processor;
+    struct csched_private * const prv = CSCHED_PRIV(per_cpu(scheduler, cpu));
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+
     BUG_ON( !__vcpu_on_runq(svc) );
+
+    /*
+     * Mark the CPU as no longer overloaded when we drop to having only
+     * 1 vCPU in its runqueue. In fact, this means that just the idle
+     * idle vCPU and a "regular" vCPU are around.
+     */
+    if ( --spc->nr_runnable <= 2 &&
+         cpumask_test_cpu(cpu, prv->overloaded) )
+        cpumask_clear_cpu(cpu, prv->overloaded);
+
+    ASSERT(spc->nr_runnable >= 1);
+
     list_del_init(&svc->runq_elem);
 }
 
@@ -590,6 +620,7 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     /* Start off idling... */
     BUG_ON(!is_idle_vcpu(curr_on_cpu(cpu)));
     cpumask_set_cpu(cpu, prv->idlers);
+    spc->nr_runnable = 1;
 }
 
 static void
@@ -1704,8 +1735,8 @@ csched_load_balance(struct csched_private *prv, int cpu,
         peer_node = node;
         do
         {
-            /* Find out what the !idle are in this node */
-            cpumask_andnot(&workers, online, prv->idlers);
+            /* Select the pCPUs in this node that have work we can steal. */
+            cpumask_and(&workers, online, prv->overloaded);
             cpumask_and(&workers, &workers, &node_to_cpumask(peer_node));
             __cpumask_clear_cpu(cpu, &workers);
 
@@ -1989,7 +2020,8 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     runq = &spc->runq;
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk("CPU[%02d] sort=%d, sibling=%s, ", cpu, spc->runq_sort_last, cpustr);
+    printk("CPU[%02d] nr_run=%d, sort=%d, sibling=%s, ",
+           cpu, spc->nr_runnable, spc->runq_sort_last, cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
     printk("core=%s\n", cpustr);
 
@@ -2027,7 +2059,7 @@ csched_dump(const struct scheduler *ops)
 
     spin_lock_irqsave(&prv->lock, flags);
 
-#define idlers_buf keyhandler_scratch
+#define cpumask_buf keyhandler_scratch
 
     printk("info:\n"
            "\tncpus              = %u\n"
@@ -2055,8 +2087,10 @@ csched_dump(const struct scheduler *ops)
            prv->ticks_per_tslice,
            vcpu_migration_delay);
 
-    cpumask_scnprintf(idlers_buf, sizeof(idlers_buf), prv->idlers);
-    printk("idlers: %s\n", idlers_buf);
+    cpumask_scnprintf(cpumask_buf, sizeof(cpumask_buf), prv->idlers);
+    printk("idlers: %s\n", cpumask_buf);
+    cpumask_scnprintf(cpumask_buf, sizeof(cpumask_buf), prv->overloaded);
+    printk("overloaded: %s\n", cpumask_buf);
 
     printk("active vcpus:\n");
     loop = 0;
@@ -2079,7 +2113,7 @@ csched_dump(const struct scheduler *ops)
             vcpu_schedule_unlock(lock, svc->vcpu);
         }
     }
-#undef idlers_buf
+#undef cpumask_buf
 
     spin_unlock_irqrestore(&prv->lock, flags);
 }
@@ -2093,8 +2127,11 @@ csched_init(struct scheduler *ops)
     if ( prv == NULL )
         return -ENOMEM;
     if ( !zalloc_cpumask_var(&prv->cpus) ||
-         !zalloc_cpumask_var(&prv->idlers) )
+         !zalloc_cpumask_var(&prv->idlers) ||
+         !zalloc_cpumask_var(&prv->overloaded) )
     {
+        free_cpumask_var(prv->overloaded);
+        free_cpumask_var(prv->idlers);
         free_cpumask_var(prv->cpus);
         xfree(prv);
         return -ENOMEM;
@@ -2141,6 +2178,7 @@ csched_deinit(struct scheduler *ops)
         ops->sched_data = NULL;
         free_cpumask_var(prv->cpus);
         free_cpumask_var(prv->idlers);
+        free_cpumask_var(prv->overloaded);
         xfree(prv);
     }
 }
