@@ -377,6 +377,7 @@ struct csched2_runqueue_data {
     cpumask_t active;      /* CPUs enabled for this runqueue */
 
     struct list_head runq; /* Ordered list of runnable vms */
+    struct list_head rsrv_runq; /* XXX */
     struct list_head svc;  /* List of all vcpus assigned to this runqueue */
     unsigned int max_weight;
 
@@ -413,6 +414,7 @@ struct csched2_private {
 struct csched2_vcpu {
     struct list_head rqd_elem;         /* On the runqueue data list  */
     struct list_head runq_elem;        /* On the runqueue            */
+    struct list_head rsrv_runq_elem;   /* XXX */
     struct csched2_runqueue_data *rqd; /* Up-pointer to the runqueue */
 
     /* Up-pointers */
@@ -453,6 +455,7 @@ struct csched2_dom {
 
     uint16_t weight;
     uint16_t cap;
+    uint16_t rsrv;
     uint16_t nr_vcpus;
 };
 
@@ -644,6 +647,7 @@ static void activate_runqueue(struct csched2_private *prv, int rqi)
     rqd->id = rqi;
     INIT_LIST_HEAD(&rqd->svc);
     INIT_LIST_HEAD(&rqd->runq);
+    INIT_LIST_HEAD(&rqd->rsrv_runq);
     spin_lock_init(&rqd->lock);
 
     __cpumask_set_cpu(rqi, &prv->active_queues);
@@ -1101,7 +1105,7 @@ update_load(const struct scheduler *ops,
 static void
 runq_insert(const struct scheduler *ops, struct csched2_vcpu *svc)
 {
-    struct list_head *iter;
+    struct list_head *iter, *rsrv_iter;
     unsigned int cpu = svc->vcpu->processor;
     struct list_head * runq = &c2rqd(ops, cpu)->runq;
     int pos = 0;
@@ -1116,9 +1120,15 @@ runq_insert(const struct scheduler *ops, struct csched2_vcpu *svc)
     ASSERT(!svc->vcpu->is_running);
     ASSERT(!(svc->flags & CSFLAG_scheduled));
 
+    rsrv_iter = &c2rqd(ops, cpu)->rsrv_runq;
+
     list_for_each( iter, runq )
     {
         struct csched2_vcpu * iter_svc = runq_elem(iter);
+
+        /* XXX */
+        if ( iter_svc->sdom->rsrv != 0 )
+            rsrv_iter = &iter_svc->rsrv_runq_elem;
 
         if ( svc->credit > iter_svc->credit )
             break;
@@ -1126,6 +1136,11 @@ runq_insert(const struct scheduler *ops, struct csched2_vcpu *svc)
         pos++;
     }
     list_add_tail(&svc->runq_elem, iter);
+    if ( svc->sdom->rsrv != 0 )
+    {
+        ASSERT(list_empty(&svc->rsrv_runq_elem));
+        list_add_tail(&svc->rsrv_runq_elem, rsrv_iter);
+    }
 
     if ( unlikely(tb_init_done) )
     {
@@ -1146,6 +1161,7 @@ static inline void runq_remove(struct csched2_vcpu *svc)
 {
     ASSERT(vcpu_on_runq(svc));
     list_del_init(&svc->runq_elem);
+    list_del_init(&svc->rsrv_runq_elem);
 }
 
 void burn_credits(struct csched2_runqueue_data *rqd, struct csched2_vcpu *, s_time_t);
@@ -1687,6 +1703,7 @@ csched2_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
 
     INIT_LIST_HEAD(&svc->rqd_elem);
     INIT_LIST_HEAD(&svc->runq_elem);
+    INIT_LIST_HEAD(&svc->rsrv_runq_elem);
 
     svc->sdom = dd;
     svc->vcpu = vc;
@@ -2373,6 +2390,7 @@ csched2_dom_cntl(
 {
     struct csched2_dom * const sdom = csched2_dom(d);
     struct csched2_private *prv = csched2_priv(ops);
+    s_time_t now = NOW();
     unsigned long flags;
     struct vcpu *v;
     int rc = 0;
@@ -2418,9 +2436,23 @@ csched2_dom_cntl(
             }
         }
 
+printk("XXX %d %d\n", op->u.credit2.cap, op->u.credit2.reservation);
+printk("XXX %d %d\n", sdom->cap, sdom->rsrv);
         /* Cap. */
         if ( op->u.credit2.cap != 0 )
         {
+            /* Only cap _or_ resevation can be in effect (for now) */
+            if ( sdom->rsrv != 0 )
+            { 
+                rc = -EBUSY;
+                goto out;
+            }
+	        if ( op->u.credit2.reservation != 0 )
+	        {
+                rc = -EINVAL;
+                goto out;
+            }
+
             sdom->tot_budget = (CSCHED2_BDGT_REPL_PERIOD / 100) * op->u.credit2.cap;
             sdom->repl_amount = sdom->tot_budget;
             if ( sdom->cap == 0 )
@@ -2480,6 +2512,100 @@ csched2_dom_cntl(
             unpark_parked_vcpus(ops, &sdom->parked_vcpus);
         }
 
+        /* Reservation */
+        if ( op->u.credit2.reservation != 0 )
+        {
+            /* Only reservation _or_ cap can be in effect (for now) */
+            if ( sdom->cap != 0 )
+            {
+                rc = -EBUSY;
+                goto out;
+            }
+            if ( op->u.credit2.cap != 0 )
+            {
+                rc = -EINVAL;
+                goto out;
+            }
+
+            sdom->tot_budget = (CSCHED2_BDGT_REPL_PERIOD / 100) * op->u.credit2.reservation;
+            sdom->repl_amount = sdom->tot_budget;
+            if ( sdom->rsrv == 0 )
+            {
+                /* XXX */
+                for_each_vcpu ( d, v )
+                {
+                    struct csched2_vcpu *svc = csched2_vcpu(v);
+
+                    spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
+
+                    //if ( svc->flags & CSFLAG_scheduled ) ???
+                    if ( v->is_running )
+                    {
+                        unsigned int cpu = v->processor;
+                        struct csched2_runqueue_data *rqd = c2rqd(ops, cpu);
+
+                        ASSERT(curr_on_cpu(cpu) == v);
+
+                        /* XXX burn now to avoid accounting budget go too negative! */
+                        burn_credits(rqd, svc, now);
+                        __cpumask_set_cpu(cpu, &rqd->tickled);
+                        ASSERT(!cpumask_test_cpu(cpu, &rqd->smt_idle));
+                        cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+                    }
+                    else if ( vcpu_on_runq(svc) )
+                    {
+                        /* XXX */
+                        runq_remove(svc);
+                        runq_insert(ops, svc);
+                    }
+                    svc->budget = 0;
+
+                    vcpu_schedule_unlock(lock, svc->vcpu);
+                }
+
+                sdom->budget = sdom->repl_amount; //XXX lock???
+                sdom->repl_time = now + CSCHED2_BDGT_REPL_PERIOD;
+                set_timer(&sdom->repl_timer, sdom->repl_time);
+            }
+            sdom->cap = op->u.credit2.cap;
+        }
+        else if ( sdom->rsrv != 0 )
+        {
+            stop_timer(&sdom->repl_timer);
+
+            /* XXX */
+            for_each_vcpu ( d, v )
+            {
+                struct csched2_vcpu *svc = csched2_vcpu(v);
+
+                spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
+
+                // XXX Safe unlocked?
+                svc->budget = STIME_MAX;
+
+                //if ( svc->flags & CSFLAG_scheduled ) ???
+                if ( v->is_running )
+                {
+                    unsigned int cpu = v->processor;
+                    struct csched2_runqueue_data *rqd = c2rqd(ops, cpu);
+
+                    ASSERT(curr_on_cpu(cpu) == v);
+
+                    /* XXX burn now to avoid accounting budget go too negative! */
+                    burn_credits(rqd, svc, now);
+                    __cpumask_set_cpu(cpu, &rqd->tickled);
+                    ASSERT(!cpumask_test_cpu(cpu, &rqd->smt_idle));
+                    cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+                }
+                else
+                    list_del_init(&svc->rsrv_runq_elem);
+
+                vcpu_schedule_unlock(lock, svc->vcpu);
+            }
+
+            sdom->cap = 0;
+        }
+ out:
         write_unlock_irqrestore(&prv->lock, flags);
         break;
     default:
@@ -2539,6 +2665,7 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     sdom->dom = dom;
     sdom->weight = CSCHED2_DEFAULT_WEIGHT;
     sdom->cap = 0U;
+    sdom->rsrv = 0;
     sdom->nr_vcpus = 0;
 
     init_timer(&sdom->repl_timer, repl_sdom_budget, (void*) sdom,
@@ -2755,6 +2882,56 @@ csched2_runtime(const struct scheduler *ops, int cpu,
     return time;
 }
 
+/* XXX */
+static inline bool
+check_runq_candidate(unsigned int cpu,
+                     const struct csched2_vcpu *svc,
+                     const struct csched2_vcpu *snext,
+                     const struct csched2_runqueue_data *rqd)
+{
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            unsigned vcpu:16, dom:16;
+        } d;
+        d.dom = svc->vcpu->domain->domain_id;
+        d.vcpu = svc->vcpu->vcpu_id;
+        __trace_var(TRC_CSCHED2_RUNQ_CAND_CHECK, 1,
+                    sizeof(d),
+                    (unsigned char *)&d);
+    }
+
+    /* Only consider vcpus that are allowed to run on this processor. */
+    if ( !cpumask_test_cpu(cpu, svc->vcpu->cpu_hard_affinity) )
+        return false;
+
+    /*
+     * If a vcpu is meant to be picked up by another processor, and such
+     * processor has not scheduled yet, leave it in the runqueue for him.
+     */
+    if ( svc->tickled_cpu != -1 && svc->tickled_cpu != cpu &&
+         cpumask_test_cpu(svc->tickled_cpu, &rqd->tickled) )
+    {
+    //XXX if ( !cpumask_test_cpu(svc->tickled_cpu, &rqd->tickled) ) //remove from above if()!
+    //     tickle_cpu(???);
+        SCHED_STAT_CRANK(deferred_to_tickled_cpu);
+        return false;
+    }
+
+    /*
+     * If this is on a different processor, don't pull it unless
+     * its credit is at least CSCHED2_MIGRATE_RESIST higher.
+     */
+    if ( svc->vcpu->processor != cpu
+         && snext->credit + CSCHED2_MIGRATE_RESIST > svc->credit )
+    {
+        SCHED_STAT_CRANK(migrate_resisted);
+        return false;
+    }
+
+    return true;
+}
+
 /*
  * Find a candidate.
  */
@@ -2765,7 +2942,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
                unsigned int *skipped)
 {
     struct list_head *iter, *temp;
-    struct csched2_vcpu *snext = NULL;
+    struct csched2_vcpu *svc = NULL, *snext = NULL;
     struct csched2_private *prv = csched2_priv(per_cpu(scheduler, cpu));
     bool yield = __test_and_clear_bit(__CSFLAG_vcpu_yield, &scurr->flags);
 
@@ -2807,50 +2984,49 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     else
         snext = csched2_vcpu(idle_vcpu[cpu]);
 
+    list_for_each_safe( iter, temp, &rqd->rsrv_runq )
+    {
+        svc = list_entry(iter, struct csched2_vcpu, rsrv_runq_elem);
+
+        if ( !check_runq_candidate(cpu, svc, snext, rqd) )
+        {
+            (*skipped)++;
+            continue;
+        }
+
+        /*
+         * If the next one on the list has more credit than current
+         * (or idle, if current is not runnable), or if current is
+         * yielding, choose it. XXX
+         */
+        if ( yield || snext->budget <= 0 || svc->credit > snext->credit )
+        {
+            /* XXX */
+            if ( !vcpu_try_get_budget(svc, /* don't park */ false) )
+                continue;
+
+            snext = svc;
+            goto done;
+        }
+
+        /* In any case, if we got this far, break. */
+        break;
+    }
+
+    /* Ora so che non c'e` nessuno dei reserved che: 1) puo` girare qui 2) ha budget 3) ha piu` crediti di me
+    quindi,, se ho budget, tocca a me */
+    ASSERT(svc == NULL || snext != svc);
+    if ( !is_idle_vcpu(snext->vcpu) && snext->sdom->rsrv != 0 && snext->budget > 0 )
+        goto done;
+
+    *skipped = 0;
     list_for_each_safe( iter, temp, &rqd->runq )
     {
-        struct csched2_vcpu * svc = list_entry(iter, struct csched2_vcpu, runq_elem);
+        svc = list_entry(iter, struct csched2_vcpu, runq_elem);
 
-        if ( unlikely(tb_init_done) )
-        {
-            struct {
-                unsigned vcpu:16, dom:16;
-            } d;
-            d.dom = svc->vcpu->domain->domain_id;
-            d.vcpu = svc->vcpu->vcpu_id;
-            __trace_var(TRC_CSCHED2_RUNQ_CAND_CHECK, 1,
-                        sizeof(d),
-                        (unsigned char *)&d);
-        }
-
-        /* Only consider vcpus that are allowed to run on this processor. */
-        if ( !cpumask_test_cpu(cpu, svc->vcpu->cpu_hard_affinity) )
+        if ( !check_runq_candidate(cpu, svc, snext, rqd) )
         {
             (*skipped)++;
-            continue;
-        }
-
-        /*
-         * If a vcpu is meant to be picked up by another processor, and such
-         * processor has not scheduled yet, leave it in the runqueue for him.
-         */
-        if ( svc->tickled_cpu != -1 && svc->tickled_cpu != cpu &&
-             cpumask_test_cpu(svc->tickled_cpu, &rqd->tickled) )
-        {
-            (*skipped)++;
-            SCHED_STAT_CRANK(deferred_to_tickled_cpu);
-            continue;
-        }
-
-        /*
-         * If this is on a different processor, don't pull it unless
-         * its credit is at least CSCHED2_MIGRATE_RESIST higher.
-         */
-        if ( svc->vcpu->processor != cpu
-             && snext->credit + CSCHED2_MIGRATE_RESIST > svc->credit )
-        {
-            (*skipped)++;
-            SCHED_STAT_CRANK(migrate_resisted);
             continue;
         }
 
@@ -2862,7 +3038,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         if ( yield || svc->credit > snext->credit )
         {
             /* XXX */
-            if ( unlikely(svc->budget != STIME_MAX &&
+            if ( unlikely(svc->sdom->cap != 0 && //svc->budget != STIME_MAX &&
                           !vcpu_try_get_budget(svc, true)) ) // /* don't park */ false)) )
                 continue;
 
@@ -2873,6 +3049,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         break;
     }
 
+ done:
     if ( unlikely(tb_init_done) )
     {
         struct {
@@ -2898,7 +3075,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
      * wouldn't have been in the runq). If it is not, it'd be STIME_MAX,
      * which still is >= 0.
      */
-    ASSERT(snext->budget >= 0);
+    //ASSERT(snext->budget >= 0); XXX
 
     return snext;
 }
@@ -2963,10 +3140,11 @@ csched2_schedule(
     /*
      *  Below 0 means: (1) we are capped; (2) we have overrun our  budget.
      *  Let's try to get more. If we can't (e.g., other vcpus are using it
-     *  all already), we will be parked.
+     *  all already), we will be parked. XXX
      */
     if ( unlikely(scurr->budget <= 0) )
-        vcpu_try_get_budget(scurr, /* park! */ true);
+        //vcpu_try_get_budget(scurr, /* park! */ true);
+        vcpu_try_get_budget(scurr, /* park for caps, not for rsrv! */ scurr->sdom->rsrv == 0);
 
     /*
      * Select next runnable local VCPU (ie top of local runq).

@@ -355,6 +355,7 @@ typedef struct xen_domctl_sched_credit {
 typedef struct xen_domctl_sched_credit2 {
     uint16_t weight;
     uint16_t cap;
+    uint16_t reservation;
 } xen_domctl_sched_credit2_t;
 
 typedef struct xen_domctl_sched_rtds {
