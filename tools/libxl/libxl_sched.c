@@ -392,6 +392,7 @@ static int sched_credit2_domain_get(libxl__gc *gc, uint32_t domid,
     scinfo->sched = LIBXL_SCHEDULER_CREDIT2;
     scinfo->weight = sdom.weight;
     scinfo->cap = sdom.cap;
+    scinfo->reservation = sdom.reservation;
 
     return 0;
 }
@@ -411,11 +412,15 @@ static int sched_credit2_domain_set(libxl__gc *gc, uint32_t domid,
     if (rc != 1 || info.domain != domid)
         return ERROR_INVAL;
 
+fprintf(stderr, "YYY %d\n", scinfo->cap);
+fprintf(stderr, "YYY %d\n", scinfo->reservation);
     rc = xc_sched_credit2_domain_get(CTX->xch, domid, &sdom);
     if (rc != 0) {
         LOGED(ERROR, domid, "Getting domain sched credit2");
         return ERROR_FAIL;
     }
+fprintf(stderr, "YYY %d\n", sdom.cap);
+fprintf(stderr, "YYY %d\n", sdom.reservation);
 
     if (scinfo->weight != LIBXL_DOMAIN_SCHED_PARAM_WEIGHT_DEFAULT) {
         if (scinfo->weight < 1 || scinfo->weight > 65535) {
@@ -437,6 +442,19 @@ static int sched_credit2_domain_set(libxl__gc *gc, uint32_t domid,
         sdom.cap = scinfo->cap;
     }
 
+    if (scinfo->reservation != LIBXL_DOMAIN_SCHED_PARAM_RSRV_DEFAULT) {
+        if (scinfo->reservation < 0
+            || scinfo->reservation > 1000) { //XXX nr_cpu_ids * 100 !!!
+            LOGD(ERROR, domid, "Cpu reservation out of range, "
+                 "valid range is from 0 to %d for this host",
+                 1000 /*XXX see above*/);
+            return ERROR_INVAL;
+        }
+        sdom.reservation = scinfo->reservation;
+    }
+
+fprintf(stderr, "YYY %d\n", sdom.cap);
+fprintf(stderr, "YYY %d\n", sdom.reservation);
     rc = xc_sched_credit2_domain_set(CTX->xch, domid, &sdom);
     if ( rc < 0 ) {
         LOGED(ERROR, domid, "Setting domain sched credit2");

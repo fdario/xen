@@ -266,6 +266,7 @@ struct cmd_spec cmd_table[] = {
       "-d DOMAIN, --domain=DOMAIN     Domain to modify\n"
       "-w WEIGHT, --weight=WEIGHT     Weight (int)\n"
       "-c CAP,    --cap=CAP           Cap (int)\n"
+      "-R RSRV,   --reservation=RSRV  Reservation (int)\n"
       "-s         --schedparam        Query / modify scheduler parameters\n"
       "-r RLIMIT, --ratelimit_us=RLIMIT Set the scheduling rate limit, in microseconds\n"
       "-p CPUPOOL, --cpupool=CPUPOOL  Restrict output to CPUPOOL"
