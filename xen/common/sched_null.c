@@ -117,6 +117,14 @@ static inline struct null_dom *null_dom(const struct domain *d)
     return d->sched_priv;
 }
 
+static inline bool check_nvc_affinity(struct null_vcpu *nvc, unsigned int cpu)
+{
+    cpumask_and(cpumask_scratch_cpu(cpu), nvc->vcpu->cpu_hard_affinity,
+                cpupool_domain_cpumask(nvc->vcpu->domain));
+
+    return cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu));
+}
+
 static int null_init(struct scheduler *ops)
 {
     struct null_private *prv;
@@ -284,16 +292,20 @@ static unsigned int pick_cpu(struct null_private *prv, struct vcpu *v)
 
     ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
 
+    cpumask_and(cpumask_scratch_cpu(cpu), v->cpu_hard_affinity, cpus);
+
     /*
      * If our processor is free, or we are assigned to it, and it is
-     * also still valid, just go for it.
+     * also still valid and part of our affinity, just go for it.
      */
     if ( likely((per_cpu(npc, cpu).vcpu == NULL || per_cpu(npc, cpu).vcpu == v)
-                && cpumask_test_cpu(cpu, cpus)) )
+                && cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu))) )
         return cpu;
 
-    /* If not, just go for a valid free pCPU, if any */
+    /* If not, just go for a free pCPU, within our affinity, if any */
     cpumask_and(cpumask_scratch_cpu(cpu), &prv->cpus_free, cpus);
+    cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
+                v->cpu_hard_affinity);
     cpu = cpumask_first(cpumask_scratch_cpu(cpu));
 
     /*
@@ -308,7 +320,10 @@ static unsigned int pick_cpu(struct null_private *prv, struct vcpu *v)
      * only if the pCPU is free.
      */
     if ( unlikely(cpu == nr_cpu_ids) )
-        cpu = cpumask_any(cpus);
+    {
+        cpumask_and(cpumask_scratch_cpu(cpu), cpus, v->cpu_hard_affinity);
+        cpu = cpumask_any(cpumask_scratch_cpu(cpu));
+    }
 
     return cpu;
 }
@@ -391,6 +406,9 @@ static void null_vcpu_insert(const struct scheduler *ops, struct vcpu *v)
         lock = pcpu_schedule_lock(cpu);
     }
 
+    cpumask_and(cpumask_scratch_cpu(cpu), v->cpu_hard_affinity,
+		cpupool_domain_cpumask(v->domain));
+
     /*
      * If the pCPU is free, we assign v to it.
      *
@@ -408,8 +426,7 @@ static void null_vcpu_insert(const struct scheduler *ops, struct vcpu *v)
          */
         vcpu_assign(prv, v, cpu);
     }
-    else if ( cpumask_intersects(&prv->cpus_free,
-                                 cpupool_domain_cpumask(v->domain)) )
+    else if ( cpumask_intersects(&prv->cpus_free, cpumask_scratch_cpu(cpu)) )
     {
         spin_unlock(lock);
         goto retry;
@@ -462,7 +479,7 @@ static void null_vcpu_remove(const struct scheduler *ops, struct vcpu *v)
 
     spin_lock(&prv->waitq_lock);
     wvc = list_first_entry_or_null(&prv->waitq, struct null_vcpu, waitq_elem);
-    if ( wvc )
+    if ( wvc && cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu)) )
     {
         vcpu_assign(prv, wvc->vcpu, cpu);
         list_del_init(&wvc->waitq_elem);
@@ -550,7 +567,7 @@ static void null_vcpu_migrate(const struct scheduler *ops, struct vcpu *v,
 
         spin_lock(&prv->waitq_lock);
         wvc = list_first_entry_or_null(&prv->waitq, struct null_vcpu, waitq_elem);
-        if ( wvc && cpumask_test_cpu(cpu, cpupool_domain_cpumask(v->domain)) )
+        if ( wvc && check_nvc_affinity(wvc, cpu) )
         {
             vcpu_assign(prv, wvc->vcpu, cpu);
             list_del_init(&wvc->waitq_elem);
@@ -573,11 +590,15 @@ static void null_vcpu_migrate(const struct scheduler *ops, struct vcpu *v,
      * Let's now consider new_cpu, which is where v is being sent. It can be
      * either free, or have a vCPU already assigned to it.
      *
-     * In the former case, we should assign v to it, and try to get it to run.
+     * In the former case, we should assign v to it, and try to get it to run,
+     * if possible, according to affinity.
      *
      * In latter, all we can do is to park v in the waitqueue.
      */
-    if ( per_cpu(npc, new_cpu).vcpu == NULL )
+    cpumask_and(cpumask_scratch_cpu(cpu), cpupool_domain_cpumask(v->domain),
+                nvc->vcpu->cpu_hard_affinity);
+    if ( per_cpu(npc, new_cpu).vcpu == NULL &&
+         cpumask_test_cpu(new_cpu, cpumask_scratch_cpu(cpu)) )
     {
         /* We don't know whether v was in the waitqueue. If yes, remove it */
         spin_lock(&prv->waitq_lock);
@@ -666,7 +687,7 @@ static struct task_slice null_schedule(const struct scheduler *ops,
     {
         spin_lock(&prv->waitq_lock);
         wvc = list_first_entry_or_null(&prv->waitq, struct null_vcpu, waitq_elem);
-        if ( wvc )
+        if ( wvc && check_nvc_affinity(wvc, cpu) )
         {
             vcpu_assign(prv, wvc->vcpu, cpu);
             list_del_init(&wvc->waitq_elem);
