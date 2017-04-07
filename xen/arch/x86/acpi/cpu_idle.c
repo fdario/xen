@@ -418,14 +418,16 @@ static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
     mwait_idle_with_hints(cx->address, MWAIT_ECX_INTERRUPT_BREAK);
 }
 
-static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
+static void acpi_idle_do_entry(unsigned int cpu, struct acpi_processor_cx *cx)
 {
+    rcu_idle_enter(cpu);
+
     switch ( cx->entry_method )
     {
     case ACPI_CSTATE_EM_FFH:
         /* Call into architectural FFH based C-state */
         acpi_processor_ffh_cstate_enter(cx);
-        return;
+        break;
     case ACPI_CSTATE_EM_SYSIO:
         /* IO port based C-state */
         inb(cx->address);
@@ -433,12 +435,14 @@ static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
            because chipsets cannot guarantee that STPCLK# signal
            gets asserted in time to freeze execution properly. */
         inl(pmtmr_ioport);
-        return;
+        break;
     case ACPI_CSTATE_EM_HALT:
         safe_halt();
         local_irq_disable();
-        return;
+        break;
     }
+
+    rcu_idle_exit(cpu);
 }
 
 static int acpi_idle_bm_check(void)
@@ -540,7 +544,8 @@ void update_idle_stats(struct acpi_processor_power *power,
 
 static void acpi_processor_idle(void)
 {
-    struct acpi_processor_power *power = processor_powers[smp_processor_id()];
+    unsigned int cpu = smp_processor_id();
+    struct acpi_processor_power *power = processor_powers[cpu];
     struct acpi_processor_cx *cx = NULL;
     int next_state;
     uint64_t t1, t2 = 0;
@@ -563,7 +568,11 @@ static void acpi_processor_idle(void)
         if ( pm_idle_save )
             pm_idle_save();
         else
+        {
+            rcu_idle_enter(cpu);
             safe_halt();
+            rcu_idle_exit(cpu);
+        }
         return;
     }
 
@@ -579,7 +588,7 @@ static void acpi_processor_idle(void)
      */
     local_irq_disable();
 
-    if ( !cpu_is_haltable(smp_processor_id()) )
+    if ( !cpu_is_haltable(cpu) )
     {
         local_irq_enable();
         sched_tick_resume();
@@ -610,7 +619,7 @@ static void acpi_processor_idle(void)
             update_last_cx_stat(power, cx, t1);
 
             /* Invoke C2 */
-            acpi_idle_do_entry(cx);
+            acpi_idle_do_entry(cpu, cx);
             /* Get end time (ticks) */
             t2 = cpuidle_get_tick();
             trace_exit_reason(irq_traced);
@@ -672,7 +681,7 @@ static void acpi_processor_idle(void)
         }
 
         /* Invoke C3 */
-        acpi_idle_do_entry(cx);
+        acpi_idle_do_entry(cpu, cx);
 
         if ( (cx->type == ACPI_STATE_C3) &&
              power->flags.bm_check && power->flags.bm_control )

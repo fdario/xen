@@ -735,8 +735,11 @@ static void mwait_idle(void)
 	if (!cx) {
 		if (pm_idle_save)
 			pm_idle_save();
-		else
+		else {
+			rcu_idle_enter(cpu);
 			safe_halt();
+			rcu_idle_exit(cpu);
+		}
 		return;
 	}
 
@@ -755,6 +758,8 @@ static void mwait_idle(void)
 		cpufreq_dbs_timer_resume();
 		return;
 	}
+
+	rcu_idle_enter(cpu);
 
 	eax = cx->address;
 	cstate = ((eax >> MWAIT_SUBSTATE_SIZE) & MWAIT_CSTATE_MASK) + 1;
@@ -787,6 +792,8 @@ static void mwait_idle(void)
 		irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
 
 	/* Now back in C0. */
+	rcu_idle_exit(cpu);
+
 	update_idle_stats(power, cx, before, after);
 	local_irq_enable();
 

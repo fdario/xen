@@ -52,7 +52,8 @@ static struct rcu_ctrlblk {
     int  next_pending;  /* Is the next batch already waiting?         */
 
     spinlock_t  lock __cacheline_aligned;
-    cpumask_t   cpumask; /* CPUs that need to switch in order    */
+    cpumask_t   cpumask; /* CPUs that need to switch in order ... */
+    cpumask_t   idle_cpumask; /* ... unless they are already idle */
     /* for current batch to proceed.        */
 } __cacheline_aligned rcu_ctrlblk = {
     .cur = -300,
@@ -248,7 +249,14 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
         smp_wmb();
         rcp->cur++;
 
-        cpumask_copy(&rcp->cpumask, &cpu_online_map);
+       /*
+        * Accessing idle_cpumask before incrementing rcp->cur needs a
+        * Barrier  Otherwise it can cause tickless idle CPUs to be
+        * included in rcp->cpumask, which will extend graceperiods
+        * unnecessarily.
+        */
+        smp_mb();
+        cpumask_andnot(&rcp->cpumask, &cpu_online_map, &rcp->idle_cpumask);
     }
 }
 
@@ -474,7 +482,23 @@ static struct notifier_block cpu_nfb = {
 void __init rcu_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
+
+    cpumask_setall(&rcu_ctrlblk.idle_cpumask);
     cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
     register_cpu_notifier(&cpu_nfb);
     open_softirq(RCU_SOFTIRQ, rcu_process_callbacks);
+}
+
+/*
+ * The CPU is becoming idle, so no more read side critical
+ * sections, and one more step toward grace period.
+ */
+void rcu_idle_enter(unsigned int cpu)
+{
+    cpumask_set_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
+}
+
+void rcu_idle_exit(unsigned int cpu)
+{
+    cpumask_clear_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
 }

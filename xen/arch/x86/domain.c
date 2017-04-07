@@ -73,9 +73,15 @@ void (*dead_idle) (void) __read_mostly = default_dead_idle;
 
 static void default_idle(void)
 {
+    unsigned int cpu = smp_processor_id();
+
     local_irq_disable();
-    if ( cpu_is_haltable(smp_processor_id()) )
+    if ( cpu_is_haltable(cpu) )
+    {
+        rcu_idle_enter(cpu);
         safe_halt();
+        rcu_idle_exit(cpu);
+    }
     else
         local_irq_enable();
 }

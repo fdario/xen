@@ -50,8 +50,10 @@ static void do_idle(void)
     local_irq_disable();
     if ( cpu_is_haltable(cpu) )
     {
+        rcu_idle_enter(cpu);
         dsb(sy);
         wfi();
+        rcu_idle_exit(cpu);
     }
     local_irq_enable();
 
