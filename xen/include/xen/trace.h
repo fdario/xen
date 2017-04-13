@@ -21,7 +21,11 @@
 #ifndef __XEN_TRACE_H__
 #define __XEN_TRACE_H__
 
+#ifdef CONFIG_TRACING
 extern int tb_init_done;
+#else
+#define tb_init_done 0
+#endif
 
 #include <public/sysctl.h>
 #include <public/trace.h>
@@ -33,6 +37,7 @@ void init_trace_bufs(void);
 /* used to retrieve the physical address of the trace buffers */
 int tb_control(struct xen_sysctl_tbuf_op *tbc);
 
+#ifdef CONFIG_TRACING
 int trace_will_trace_event(u32 event);
 
 void __trace_var(u32 event, bool_t cycles, unsigned int extra, const void *);
@@ -113,7 +118,7 @@ void __trace_hypercall(uint32_t event, unsigned long op,
         }                                                       \
     } while ( 0 )
 
-#define TRACE_6D(_e,d1,d2,d3,d4,d5,d6)                             \
+#define TRACE_6D(_e,d1,d2,d3,d4,d5,d6)                          \
     do {                                                        \
         if ( unlikely(tb_init_done) )                           \
         {                                                       \
@@ -127,5 +132,28 @@ void __trace_hypercall(uint32_t event, unsigned long op,
             __trace_var(_e, 1, sizeof(_d), _d);                 \
         }                                                       \
     } while ( 0 )
+#else /* !CONFIG_TRACING */
+#define trace_will_trace_event(u)     (0)
+static inline void __trace_var(u32 event, bool_t cycles, unsigned int extra,
+                               const void *extra_data)
+{
+}
+static inline void trace_var(u32 event, int cycles, int extra,
+                             const void *extra_data)
+{
+}
+static inline void __trace_hypercall(uint32_t event, unsigned long op,
+                                     const xen_ulong_t *args)
+{
+}
+
+#define TRACE_0D(e)                   do {} while ( 0 )
+#define TRACE_1D(e,d1)                do {} while ( 0 )
+#define TRACE_2D(e,d1,d2)             do {} while ( 0 )
+#define TRACE_3D(e,d1,d2,d3)          do {} while ( 0 )
+#define TRACE_4D(e,d1,d2,d3,d4)       do {} while ( 0 )
+#define TRACE_5D(e,d1,d2,d3,d4,d5)    do {} while ( 0 )
+#define TRACE_6D(e,d1,d2,d3,d4,d5,d6) do {} while ( 0 )
+#endif /* CONFIG_TRACING */
 
 #endif /* __XEN_TRACE_H__ */

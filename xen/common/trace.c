@@ -48,6 +48,11 @@ static unsigned int opt_tevt_mask;
 integer_param("tbuf_size", opt_tbuf_size);
 integer_param("tevt_mask", opt_tevt_mask);
 
+#ifdef CONFIG_TRACING
+/* a flag recording whether initialization has been done */
+/* or more properly, if the tbuf subsystem is enabled right now */
+int tb_init_done __read_mostly;
+
 /* Pointers to the meta-data objects for all system trace buffers */
 static struct t_info *t_info;
 static unsigned int t_info_pages;
@@ -63,10 +68,6 @@ static u32 t_buf_highwater;
 /* Number of records lost due to per-CPU trace buffer being full. */
 static DEFINE_PER_CPU(unsigned long, lost_records);
 static DEFINE_PER_CPU(unsigned long, lost_records_first_tsc);
-
-/* a flag recording whether initialization has been done */
-/* or more properly, if the tbuf subsystem is enabled right now */
-int tb_init_done __read_mostly;
 
 /* which CPUs tracing is enabled on */
 static cpumask_t tb_cpu_mask;
@@ -868,6 +869,36 @@ void __trace_hypercall(uint32_t event, unsigned long op,
 
     __trace_var(event, 1, sizeof(uint32_t) * (1 + (a - d.args)), &d);
 }
+#else /* !CONFIG_TRACING */
+void __init init_trace_bufs(void)
+{
+    opt_tbuf_size = 0;
+}
+
+int tb_control(xen_sysctl_tbuf_op_t *tbc)
+{
+    static DEFINE_SPINLOCK(lock);
+    int rc = 0;
+
+    spin_lock(&lock);
+
+    switch ( tbc->cmd )
+    {
+    case XEN_SYSCTL_TBUFOP_get_info:
+        tbc->evt_mask = 0;
+        tbc->buffer_mfn = 0;
+        tbc->size = 0;
+        break;
+    default:
+        rc = -ENOSYS;
+        break;
+    }
+
+    spin_unlock(&lock);
+
+    return rc;
+}
+#endif /* CONFIG_TRACING */
 
 /*
  * Local variables:

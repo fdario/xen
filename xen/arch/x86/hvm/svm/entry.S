@@ -61,10 +61,12 @@ __UNLIKELY_END(nsvm_hap)
 
         call svm_asid_handle_vmrun
 
+#ifdef CONFIG_TRACING
         cmpb $0,tb_init_done(%rip)
 UNLIKELY_START(nz, svm_trace)
         call svm_trace_vmentry
 UNLIKELY_END(svm_trace)
+#endif
 
         mov  VCPU_svm_vmcb(%rbx),%rcx
         mov  UREGS_rax(%rsp),%rax

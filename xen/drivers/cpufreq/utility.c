@@ -362,11 +362,14 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 
     if (cpu_online(policy->cpu) && cpufreq_driver->target)
     {
-        unsigned int prev_freq = policy->cur;
+        uint32_t d[2] = { policy->cur, 0 };
 
         retval = cpufreq_driver->target(policy, target_freq, relation);
         if ( retval == 0 )
-            TRACE_2D(TRC_PM_FREQ_CHANGE, prev_freq/1000, policy->cur/1000);
+        {
+            d[1] = policy->cur/1000;
+            trace_var(TRC_PM_FREQ_CHANGE, 1, sizeof(d), d);
+        }
     }
 
     return retval;

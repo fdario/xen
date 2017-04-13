@@ -98,6 +98,14 @@ config PERF_ARRAYS
 	---help---
 	  Enables software performance counter array histograms.
 
+config TRACING
+	bool "Tracing"
+	default y
+	---help---
+	  Enables collecting traces of events occurring in the hypervisor
+	  in per-CPU ring buffers. The 'xentrace' tool can be used to read
+	  the buffers and dump the content on the disk.
+
 
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"
