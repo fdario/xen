@@ -722,7 +722,12 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     /* Read tb_init_done /before/ t_bufs. */
     smp_rmb();
 
-    spin_lock_irqsave(&this_cpu(t_lock), flags);
+    /*
+     * spin_lock_irqsave() would call local_irq_save(), which (may)
+     * call __trace_var(). Open code it to avoid recursing.
+     */
+    _local_irq_save(flags);
+    spin_lock(&this_cpu(t_lock));
 
     buf = this_cpu(t_bufs);
 
@@ -809,7 +814,8 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     __insert_record(buf, event, extra, cycles, rec_size, extra_data);
 
 unlock:
-    spin_unlock_irqrestore(&this_cpu(t_lock), flags);
+    spin_unlock(&this_cpu(t_lock));
+    _local_irq_restore(flags);
 
     /* Notify trace buffer consumer that we've crossed the high water mark. */
     if ( likely(buf!=NULL)

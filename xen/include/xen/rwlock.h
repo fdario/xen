@@ -73,14 +73,19 @@ static inline void _read_lock(rwlock_t *lock)
 static inline void _read_lock_irq(rwlock_t *lock)
 {
     ASSERT(local_irq_is_enabled());
-    local_irq_disable();
+    _local_irq_disable();
+    if ( unlikely(tb_init_done) )
+        trace_irq_disable_ret();
     _read_lock(lock);
 }
 
 static inline unsigned long _read_lock_irqsave(rwlock_t *lock)
 {
     unsigned long flags;
-    local_irq_save(flags);
+
+    _local_irq_save(flags);
+    if ( unlikely(tb_init_done) )
+        trace_irq_save_ret(flags);
     _read_lock(lock);
     return flags;
 }
@@ -100,13 +105,17 @@ static inline void _read_unlock(rwlock_t *lock)
 static inline void _read_unlock_irq(rwlock_t *lock)
 {
     _read_unlock(lock);
-    local_irq_enable();
+    if ( unlikely(tb_init_done) )
+        trace_irq_enable_ret();
+    _local_irq_enable();
 }
 
 static inline void _read_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
 {
     _read_unlock(lock);
-    local_irq_restore(flags);
+    if ( unlikely(tb_init_done) )
+        trace_irq_restore_ret(flags);
+    _local_irq_restore(flags);
 }
 
 static inline int _rw_is_locked(rwlock_t *lock)
@@ -130,7 +139,9 @@ static inline void _write_lock(rwlock_t *lock)
 static inline void _write_lock_irq(rwlock_t *lock)
 {
     ASSERT(local_irq_is_enabled());
-    local_irq_disable();
+    _local_irq_disable();
+    if ( unlikely(tb_init_done) )
+        trace_irq_disable_ret();
     _write_lock(lock);
 }
 
@@ -138,7 +149,9 @@ static inline unsigned long _write_lock_irqsave(rwlock_t *lock)
 {
     unsigned long flags;
 
-    local_irq_save(flags);
+    _local_irq_save(flags);
+    if ( unlikely(tb_init_done) )
+        trace_irq_save_ret(flags);
     _write_lock(lock);
     return flags;
 }
@@ -171,13 +184,17 @@ static inline void _write_unlock(rwlock_t *lock)
 static inline void _write_unlock_irq(rwlock_t *lock)
 {
     _write_unlock(lock);
-    local_irq_enable();
+    if ( unlikely(tb_init_done) )
+        trace_irq_enable_ret();
+    _local_irq_enable();
 }
 
 static inline void _write_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
 {
     _write_unlock(lock);
-    local_irq_restore(flags);
+    if ( unlikely(tb_init_done) )
+        trace_irq_restore_ret(flags);
+    _local_irq_restore(flags);
 }
 
 static inline int _rw_is_write_locked(rwlock_t *lock)

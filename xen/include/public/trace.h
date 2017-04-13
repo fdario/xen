@@ -275,6 +275,8 @@
 #define TRC_HW_IRQ_ENTER              (TRC_HW_IRQ + 0xA)
 #define TRC_HW_IRQ_GUEST              (TRC_HW_IRQ + 0xB)
 #define TRC_HW_IRQ_EXIT               (TRC_HW_IRQ + 0xC)
+#define TRC_HW_IRQ_DISABLE            (TRC_HW_IRQ + 0xD)
+#define TRC_HW_IRQ_ENABLE             (TRC_HW_IRQ + 0xE)
 
 /*
  * Event Flags

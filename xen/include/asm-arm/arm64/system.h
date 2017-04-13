@@ -4,6 +4,8 @@
 
 #include <asm/arm64/cmpxchg.h>
 
+#include <xen/trace.h>
+
 /* Uses uimm4 as a bitmask to select the clearing of one or more of
  * the DAIF exception mask bits:
  * bit 3 selects the D mask,
@@ -43,6 +45,16 @@
         : "r" (x)                                                \
         : "memory");                                             \
 })
+
+/* We do not support tracing (at all) yet */
+#define trace_irq_disable_ret()   do { } while ( 0 )
+#define trace_irq_enable_ret()    do { } while ( 0 )
+#define trace_irq_save_ret(_x)    do { } while ( 0 )
+#define trace_irq_restore_ret(_x) do { } while ( 0 )
+#define _local_irq_disable()      local_irq_disable()
+#define _local_irq_enable()       local_irq_enable()
+#define _local_irq_save(_x)       local_irq_save(_x)
+#define _local_irq_restore(_x)    local_irq_restore(_x)
 
 static inline int local_irq_is_enabled(void)
 {

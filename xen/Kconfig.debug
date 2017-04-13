@@ -98,7 +98,7 @@ config PERF_ARRAYS
 	---help---
 	  Enables software performance counter array histograms.
 
-config TRACING
+menuconfig TRACING
 	bool "Tracing"
 	default y
 	---help---
@@ -106,6 +106,15 @@ config TRACING
 	  in per-CPU ring buffers. The 'xentrace' tool can be used to read
 	  the buffers and dump the content on the disk.
 
+config TRACE_IRQSOFF
+	bool "Trace when IRQs are disabled and (re)enabled" if EXPERT = "y"
+	default n
+	depends on TRACING
+	---help---
+	  Makes it possible to generate events _every_ time IRQs are disabled
+          and (re)enabled, with also an indication of where that happened.
+          Note that this comes with high overead and produces huge amount of
+          tracing data.
 
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"

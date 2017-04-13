@@ -5,6 +5,8 @@
 #include <xen/bitops.h>
 #include <asm/processor.h>
 
+#include <xen/trace.h>
+
 #define read_sreg(name)                                         \
 ({  unsigned int __sel;                                         \
     asm volatile ( "mov %%" STR(name) ",%0" : "=r" (__sel) );   \
@@ -185,8 +187,8 @@ static always_inline unsigned long __xadd(
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
-#define local_irq_disable()     asm volatile ( "cli" : : : "memory" )
-#define local_irq_enable()      asm volatile ( "sti" : : : "memory" )
+#define _local_irq_disable()    asm volatile ( "cli" : : : "memory" )
+#define _local_irq_enable()     asm volatile ( "sti" : : : "memory" )
 
 /* used in the idle loop; sti takes one instruction cycle to complete */
 #define safe_halt()     asm volatile ( "sti; hlt" : : : "memory" )
@@ -198,12 +200,12 @@ static always_inline unsigned long __xadd(
     BUILD_BUG_ON(sizeof(x) != sizeof(long));                     \
     asm volatile ( "pushf" __OS " ; pop" __OS " %0" : "=g" (x)); \
 })
-#define local_irq_save(x)                                        \
+#define _local_irq_save(x)                                       \
 ({                                                               \
     local_save_flags(x);                                         \
-    local_irq_disable();                                         \
+    _local_irq_disable();                                        \
 })
-#define local_irq_restore(x)                                     \
+#define _local_irq_restore(x)                                    \
 ({                                                               \
     BUILD_BUG_ON(sizeof(x) != sizeof(long));                     \
     asm volatile ( "pushfq\n\t"                                  \
@@ -213,6 +215,79 @@ static always_inline unsigned long __xadd(
                    : : "i?r" ( ~X86_EFLAGS_IF ),                 \
                        "ri" ( (x) & X86_EFLAGS_IF ) );           \
 })
+
+#ifdef CONFIG_TRACE_IRQSOFF
+
+#define TRACE_LOCAL_ADDR ((uint64_t) current_text_addr())
+#define TRACE_RET_ADDR   ((uint64_t) __builtin_return_address(0))
+
+#define trace_irq_disable(_a)                                    \
+({                                                               \
+    uint64_t addr = _a;                                          \
+    __trace_var(TRC_HW_IRQ_DISABLE, 1, sizeof(addr), &addr);     \
+})
+#define trace_irq_enable(_a)                                     \
+({                                                               \
+    uint64_t addr = _a;                                          \
+    __trace_var(TRC_HW_IRQ_ENABLE, 1, sizeof(addr), &addr);      \
+})
+#define trace_irq_save(_x, _a)                                   \
+({                                                               \
+    uint64_t addr = _a;                                          \
+    if ( _x & X86_EFLAGS_IF )                                    \
+        __trace_var(TRC_HW_IRQ_DISABLE, 1, sizeof(addr), &addr); \
+})
+#define trace_irq_restore(_x, _a)                                \
+({                                                               \
+    uint64_t addr = _a;                                          \
+    if ( _x & X86_EFLAGS_IF )                                    \
+        __trace_var(TRC_HW_IRQ_ENABLE, 1, sizeof(addr), &addr);  \
+})
+
+#define trace_irq_disable_ret()   trace_irq_disable(TRACE_RET_ADDR)
+#define trace_irq_enable_ret()    trace_irq_enable(TRACE_RET_ADDR)
+#define trace_irq_save_ret(_x)    trace_irq_save(_x, TRACE_RET_ADDR)
+#define trace_irq_restore_ret(_x) trace_irq_restore(_x, TRACE_RET_ADDR)
+
+#define local_irq_disable()                      \
+({                                               \
+    bool_t irqon = local_irq_is_enabled();       \
+    _local_irq_disable();                        \
+    if ( unlikely(tb_init_done && irqon) )       \
+        trace_irq_disable(TRACE_LOCAL_ADDR);     \
+})
+
+#define local_irq_enable()                       \
+({                                               \
+    if ( unlikely(tb_init_done) )                \
+        trace_irq_enable(TRACE_LOCAL_ADDR);      \
+    _local_irq_enable();                         \
+})
+
+#define local_irq_save(_x)                       \
+({                                               \
+    local_save_flags(_x);                        \
+    _local_irq_disable();                        \
+    if ( unlikely(tb_init_done) )                \
+        trace_irq_save(_x, TRACE_LOCAL_ADDR);    \
+})
+
+#define local_irq_restore(_x)                    \
+({                                               \
+    if ( unlikely(tb_init_done) )                \
+        trace_irq_restore(_x, TRACE_LOCAL_ADDR); \
+    _local_irq_restore(_x);                      \
+})
+#else /* !TRACE_IRQSOFF */
+#define trace_irq_disable_ret()   do { } while ( 0 )
+#define trace_irq_enable_ret()    do { } while ( 0 )
+#define trace_irq_save_ret(_x)    do { } while ( 0 )
+#define trace_irq_restore_ret(_x) do { } while ( 0 )
+#define local_irq_disable()       _local_irq_disable()
+#define local_irq_enable()        _local_irq_enable()
+#define local_irq_save(_x)        _local_irq_save(_x)
+#define local_irq_restore(_x)     _local_irq_restore(_x)
+#endif /* TRACE_IRQSOFF */
 
 static inline int local_irq_is_enabled(void)
 {
