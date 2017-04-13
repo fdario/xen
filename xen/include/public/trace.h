@@ -95,6 +95,7 @@
 
 /* Trace subclasses for Xen internals */
 #define TRC_XEN_RCU         0x01001000   /* RCU traces */
+#define TRC_XEN_SIRQ        0x01002000   /* Traces relating to softirqs */
 
 /* Trace events per class */
 #define TRC_LOST_RECORDS        (TRC_GEN + 1)
@@ -291,6 +292,12 @@
 #define TRC_XEN_RCU_CHECK_QSTATE      (TRC_XEN_RCU + 0x6)
 #define TRC_XEN_RCU_DO_CALLBKS        (TRC_XEN_RCU + 0x7)
 #define TRC_XEN_RCU_PENDING           (TRC_XEN_RCU + 0x8)
+
+/* Trace events for softirqs */
+#define TRC_XEN_SIRQ_HANDLER          (TRC_XEN_SIRQ + 0x1)
+#define TRC_XEN_SIRQ_RAISE_MASK       (TRC_XEN_SIRQ + 0x2)
+#define TRC_XEN_SIRQ_RAISE_CPU        (TRC_XEN_SIRQ + 0x3)
+#define TRC_XEN_SIRQ_RAISE            (TRC_XEN_SIRQ + 0x4)
 
 /*
  * Event Flags

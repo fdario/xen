@@ -13,6 +13,7 @@
 #include <xen/mm.h>
 #include <xen/preempt.h>
 #include <xen/sched.h>
+#include <xen/trace.h>
 #include <xen/rcupdate.h>
 #include <xen/softirq.h>
 
@@ -24,6 +25,57 @@ static softirq_handler softirq_handlers[NR_SOFTIRQS];
 
 static DEFINE_PER_CPU(cpumask_t, batch_mask);
 static DEFINE_PER_CPU(unsigned int, batching);
+
+#ifdef CONFIG_TRACE_SOFTIRQS
+#define trace_raise(n)        TRACE_1D(TRC_XEN_SIRQ_RAISE, n)
+static inline void trace_raise_cpu(unsigned int nr, unsigned int cpu)
+{
+    struct {
+        uint16_t cpu, nr;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.nr = nr;
+    d.cpu = cpu;
+    __trace_var(TRC_XEN_SIRQ_RAISE_CPU, 1, sizeof(d), &d);
+}
+static inline
+void trace_raise_mask(unsigned int nr, const cpumask_t *m)
+{
+    struct {
+        uint32_t nr;
+        uint32_t mask[6];
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.nr = nr;
+    memset(d.mask, 0, sizeof(d.mask));
+    memcpy(d.mask, m, min(sizeof(d.mask), sizeof(cpumask_t)));
+    __trace_var(TRC_XEN_SIRQ_RAISE_MASK, 1, sizeof(d), &d);
+}
+static inline void trace_handler(unsigned int nr, unsigned int cpu)
+{
+    struct {
+        uint16_t pending, nr;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.nr = nr;
+    d.pending = (uint16_t)softirq_pending(cpu);
+    __trace_var(TRC_XEN_SIRQ_HANDLER, 1, sizeof(d), &d);
+}
+#else /* !TRACE_SOFTIRQS */
+#define trace_raise(n)            do {} while ( 0 )
+#define trace_raise_cpu(n, c)     do {} while ( 0 )
+#define trace_raise_mask(n, m) do {} while ( 0 )
+#define trace_handler(n, c)       do {} while ( 0 )
+#endif /* TRACE_SOFTIRQS */
 
 static void __do_softirq(unsigned long ignore_mask)
 {
@@ -43,6 +95,7 @@ static void __do_softirq(unsigned long ignore_mask)
 
         i = find_first_set_bit(pending);
         clear_bit(i, &softirq_pending(cpu));
+        trace_handler(i, cpu);
         (*softirq_handlers[i])();
     }
 }
@@ -71,6 +124,8 @@ void cpumask_raise_softirq(const cpumask_t *mask, unsigned int nr)
     unsigned int cpu, this_cpu = smp_processor_id();
     cpumask_t send_mask, *raise_mask;
 
+    trace_raise_mask(nr, mask);
+
     if ( !per_cpu(batching, this_cpu) || in_irq() )
     {
         cpumask_clear(&send_mask);
@@ -92,6 +147,8 @@ void cpumask_raise_softirq(const cpumask_t *mask, unsigned int nr)
 void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
 {
     unsigned int this_cpu = smp_processor_id();
+
+    trace_raise_cpu(nr, cpu);
 
     if ( test_and_set_bit(nr, &softirq_pending(cpu))
          || (cpu == this_cpu)
@@ -125,6 +182,7 @@ void cpu_raise_softirq_batch_finish(void)
 
 void raise_softirq(unsigned int nr)
 {
+    trace_raise(nr);
     set_bit(nr, &softirq_pending(smp_processor_id()));
 }
 

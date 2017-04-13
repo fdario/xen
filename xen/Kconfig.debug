@@ -124,6 +124,14 @@ config TRACE_RCU
          Makes it possible generate events  showing the activity and the
          behavior of the RCU subsystem.
 
+config TRACE_SOFTIRQS
+	bool "Trace when softirqs are raised and handled" if EXPERT = "y"
+	default n
+	depends on TRACING
+	---help---
+	  Makes it possible to generate events related to raising and
+          handling of softirqs within Xen.
+
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"
 	default DEBUG
