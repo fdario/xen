@@ -214,6 +214,11 @@
 0x01001007  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_do_callbacks [ ]
 0x01001008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_pending [ %(1)d ]
 
+0x01002001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_handler [ nr:pending_mask = 0x%(1)08x ]
+0x01002002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_raise_cpumask [ nr = %(1)d, CPU mask: 0x%(7)08x%(6)08x%(5)08x%(4)08x%(3)08x%(2)08x ]
+0x01002003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_raise_cpu [ nr:cpu = 0x%(1)08x ]
+0x01002004  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_raise [ nr = %(1)d ]
+
 0x00084001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  hpet create [ tn = %(1)d, irq = %(2)d, delta = 0x%(4)08x%(3)08x, period = 0x%(6)08x%(5)08x ]
 0x00084002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  pit create [ delta = 0x%(1)016x, period = 0x%(2)016x ]
 0x00084003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtc create [ delta = 0x%(1)016x , period = 0x%(2)016x ]

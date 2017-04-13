@@ -8684,6 +8684,84 @@ void rcu_process(struct pcpu_info *p) {
     }
 }
 
+void softirq_process(struct pcpu_info *p) {
+    struct record_info *ri = &p->ri;
+
+    switch ( ri->event )
+    {
+    case TRC_XEN_SIRQ_RAISE:
+    {
+        struct {
+            uint32_t nr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s raise_softirq nr %u\n",
+                   ri->dump_header,
+                   r->nr);
+        }
+        break;
+    }
+    case TRC_XEN_SIRQ_RAISE_CPU:
+    {
+        struct {
+            uint16_t cpu, nr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s raise_softirq nr %u on cpu %u\n",
+                   ri->dump_header,
+                   r->nr,
+                   r->cpu);
+        }
+        break;
+    }
+    case TRC_XEN_SIRQ_RAISE_MASK:
+    {
+        struct {
+            uint32_t nr;
+            uint32_t mask[6];
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            int i;
+
+            i = 5;
+            while ( i >= 0 && !r->mask[i] ) i--;
+            printf(" %s raise_softirq nr %u on cpumask 0x",
+                   ri->dump_header,
+                   r->nr);
+            for ( ; i >= 0 ; i-- )
+                printf("%08x", r->mask[i]);
+            printf("\n");
+        }
+        break;
+    }
+    case TRC_XEN_SIRQ_HANDLER:
+    {
+        struct {
+            uint16_t pending, nr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s softirq_handler nr %u, pending = 0x%08x\n",
+                   ri->dump_header,
+                   r->nr,
+                   r->pending);
+        }
+        break;
+    }
+    default:
+        if( opt.dump_all )
+            dump_generic(stdout, ri);
+        break;
+    }
+}
+
 #define TRC_HW_SUB_PM 1
 #define TRC_HW_SUB_IRQ 2
 void hw_process(struct pcpu_info *p)
@@ -8703,6 +8781,7 @@ void hw_process(struct pcpu_info *p)
 }
 
 #define TRC_XEN_SUB_RCU 1
+#define TRC_XEN_SUB_SIRQ 2
 void xen_process(struct pcpu_info *p)
 {
     struct record_info *ri = &p->ri;
@@ -8711,6 +8790,9 @@ void xen_process(struct pcpu_info *p)
     {
     case TRC_XEN_SUB_RCU:
         rcu_process(p);
+        break;
+    case TRC_XEN_SUB_SIRQ:
+        softirq_process(p);
         break;
     }
 }
