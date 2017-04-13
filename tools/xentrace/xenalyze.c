@@ -8562,6 +8562,22 @@ void irq_process(struct pcpu_info *p) {
         }
         break;
     }
+    case TRC_HW_IRQ_DISABLE:
+    case TRC_HW_IRQ_ENABLE:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s irq_%s, from %p\n",
+                   ri->dump_header,
+                   ri->event == TRC_HW_IRQ_DISABLE ? "disable" : "enable",
+                   (void*)r->addr);
+        }
+        break;
+    }
     case TRC_HW_IRQ_CLEAR_VECTOR:
     case TRC_HW_IRQ_MOVE_FINISH :
     default:
