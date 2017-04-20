@@ -39,6 +39,7 @@
 #define TRC_PV       0x0020f000    /* Xen PV traces            */
 #define TRC_SHADOW   0x0040f000    /* Xen shadow tracing       */
 #define TRC_HW       0x0080f000    /* Xen hardware-related traces */
+#define TRC_XEN      0x0100f000    /* Xen misc traces (RCU, softirq, etc) */
 #define TRC_GUEST    0x0800f000    /* Guest-generated traces   */
 #define TRC_ALL      0x0ffff000
 #define TRC_HD_TO_EVENT(x) ((x)&0x0fffffff)
@@ -91,6 +92,9 @@
 /* Trace classes for Hardware */
 #define TRC_HW_PM           0x00801000   /* Power management traces */
 #define TRC_HW_IRQ          0x00802000   /* Traces relating to the handling of IRQs */
+
+/* Trace subclasses for Xen internals */
+#define TRC_XEN_RCU         0x01001000   /* RCU traces */
 
 /* Trace events per class */
 #define TRC_LOST_RECORDS        (TRC_GEN + 1)
@@ -277,6 +281,16 @@
 #define TRC_HW_IRQ_EXIT               (TRC_HW_IRQ + 0xC)
 #define TRC_HW_IRQ_DISABLE            (TRC_HW_IRQ + 0xD)
 #define TRC_HW_IRQ_ENABLE             (TRC_HW_IRQ + 0xE)
+
+/* Trace events for RCU */
+#define TRC_XEN_RCU_FORCE_QSTATE      (TRC_XEN_RCU + 0x1)
+#define TRC_XEN_RCU_CALL_RCU          (TRC_XEN_RCU + 0x2)
+#define TRC_XEN_RCU_START_BATCH       (TRC_XEN_RCU + 0x3)
+#define TRC_XEN_RCU_DO_BATCH          (TRC_XEN_RCU + 0x4)
+#define TRC_XEN_RCU_CPU_QUIET         (TRC_XEN_RCU + 0x5)
+#define TRC_XEN_RCU_CHECK_QSTATE      (TRC_XEN_RCU + 0x6)
+#define TRC_XEN_RCU_DO_CALLBKS        (TRC_XEN_RCU + 0x7)
+#define TRC_XEN_RCU_PENDING           (TRC_XEN_RCU + 0x8)
 
 /*
  * Event Flags

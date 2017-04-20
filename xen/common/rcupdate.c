@@ -92,6 +92,57 @@ static int qhimark = 10000;
 static int qlowmark = 100;
 static int rsinterval = 1000;
 
+#ifdef CONFIG_TRACE_RCU
+static inline void trace_call_rcu(void *func)
+{
+    uint64_t addr = (uint64_t)func;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    __trace_var(TRC_XEN_RCU_CALL_RCU, 0, sizeof(addr), &addr);
+}
+static inline void trace_start_batch(const cpumask_t *m)
+{
+    uint32_t mask[6];
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    memset(mask, 0, sizeof(mask));
+    memcpy(mask, m, min(sizeof(mask), sizeof(cpumask_t)));
+    __trace_var(TRC_XEN_RCU_START_BATCH, 0, sizeof(mask), &mask);
+}
+static inline void trace_do_batch(void *func, long int qlen)
+{
+    struct {
+        uint64_t addr;
+        int64_t qlen;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)func;
+    d.qlen = qlen;
+    __trace_var(TRC_XEN_RCU_DO_BATCH, 0, sizeof(d), &d);
+}
+#define trace_force_qstate()    TRACE_0D(TRC_XEN_RCU_FORCE_QSTATE)
+#define trace_cpu_quiet()       TRACE_0D(TRC_XEN_RCU_CPU_QUIET)
+#define trace_check_qstate(p)   TRACE_1D(TRC_XEN_RCU_CHECK_QSTATE, p)
+#define trace_do_callbacks()    TRACE_0D(TRC_XEN_RCU_DO_CALLBKS)
+#define trace_pending(p)        TRACE_1D(TRC_XEN_RCU_PENDING, p)
+#else /* !TRACE_RCU */
+#define trace_call_rcu(f)       do {} while ( 0 )
+#define trace_start_batch(m)    do {} while ( 0 )
+#define trace_do_batch(f, q)    do {} while ( 0 )
+#define trace_force_qstate()    do {} while ( 0 )
+#define trace_cpu_quiet()       do {} while ( 0 )
+#define trace_check_qstate(p)   do {} while ( 0 )
+#define trace_do_callbacks()    do {} while ( 0 )
+#define trace_pending(p)        do {} while ( 0 )
+#endif /* TRACE_RCU */
+
 struct rcu_barrier_data {
     struct rcu_head head;
     atomic_t *cpu_count;
@@ -145,6 +196,9 @@ static void force_quiescent_state(struct rcu_data *rdp,
                                   struct rcu_ctrlblk *rcp)
 {
     cpumask_t cpumask;
+
+    trace_force_qstate();
+
     raise_softirq(SCHEDULE_SOFTIRQ);
     if (unlikely(rdp->qlen - rdp->last_rs_qlen > rsinterval)) {
         rdp->last_rs_qlen = rdp->qlen;
@@ -177,6 +231,7 @@ void call_rcu(struct rcu_head *head,
     head->func = func;
     head->next = NULL;
     local_irq_save(flags);
+    trace_call_rcu(func);
     rdp = &__get_cpu_var(rcu_data);
     *rdp->nxttail = head;
     rdp->nxttail = &head->next;
@@ -199,12 +254,14 @@ static void rcu_do_batch(struct rcu_data *rdp)
     list = rdp->donelist;
     while (list) {
         next = rdp->donelist = list->next;
+        trace_do_batch(list->func, rdp->qlen);
         list->func(list);
         list = next;
         rdp->qlen--;
         if (++count >= rdp->blimit)
             break;
     }
+
     if (rdp->blimit == INT_MAX && rdp->qlen <= qlowmark)
         rdp->blimit = blimit;
     if (!rdp->donelist)
@@ -249,6 +306,7 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
         rcp->cur++;
 
         cpumask_copy(&rcp->cpumask, &cpu_online_map);
+        trace_start_batch(&rcp->cpumask);
     }
 }
 
@@ -259,6 +317,7 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
  */
 static void cpu_quiet(int cpu, struct rcu_ctrlblk *rcp)
 {
+    trace_cpu_quiet();
     cpumask_clear_cpu(cpu, &rcp->cpumask);
     if (cpumask_empty(&rcp->cpumask)) {
         /* batch completed ! */
@@ -279,7 +338,7 @@ static void rcu_check_quiescent_state(struct rcu_ctrlblk *rcp,
         /* start new grace period: */
         rdp->qs_pending = 1;
         rdp->quiescbatch = rcp->cur;
-        return;
+        goto out;
     }
 
     /* Grace period already completed for this cpu?
@@ -287,7 +346,7 @@ static void rcu_check_quiescent_state(struct rcu_ctrlblk *rcp,
      * cacheline trashing.
      */
     if (!rdp->qs_pending)
-        return;
+        goto out;
 
     rdp->qs_pending = 0;
 
@@ -300,6 +359,8 @@ static void rcu_check_quiescent_state(struct rcu_ctrlblk *rcp,
         cpu_quiet(rdp->cpu, rcp);
 
     spin_unlock(&rcp->lock);
+ out:
+    trace_check_qstate(rdp->qs_pending);
 }
 
 
@@ -309,6 +370,8 @@ static void rcu_check_quiescent_state(struct rcu_ctrlblk *rcp,
 static void __rcu_process_callbacks(struct rcu_ctrlblk *rcp,
                                     struct rcu_data *rdp)
 {
+    trace_do_callbacks();
+
     if (rdp->curlist && !rcu_batch_before(rcp->completed, rdp->batch)) {
         *rdp->donetail = rdp->curlist;
         rdp->donetail = rdp->curtail;
@@ -357,26 +420,31 @@ static void rcu_process_callbacks(void)
 
 static int __rcu_pending(struct rcu_ctrlblk *rcp, struct rcu_data *rdp)
 {
+    bool ret = true;
+
     /* This cpu has pending rcu entries and the grace period
      * for them has completed.
      */
     if (rdp->curlist && !rcu_batch_before(rcp->completed, rdp->batch))
-        return 1;
+        goto out;
 
     /* This cpu has no pending entries, but there are new entries */
     if (!rdp->curlist && rdp->nxtlist)
-        return 1;
+        goto out;
 
     /* This cpu has finished callbacks to invoke */
     if (rdp->donelist)
-        return 1;
+        goto out;
 
     /* The rcu core waits for a quiescent state from the cpu */
     if (rdp->quiescbatch != rcp->cur || rdp->qs_pending)
-        return 1;
+        goto out;
 
     /* nothing to do */
-    return 0;
+    ret = false;
+ out:
+    trace_pending(ret);
+    return ret;
 }
 
 int rcu_pending(int cpu)

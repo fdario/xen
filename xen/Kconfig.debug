@@ -116,6 +116,14 @@ config TRACE_IRQSOFF
           Note that this comes with high overead and produces huge amount of
           tracing data.
 
+config TRACE_RCU
+       bool "Trace RCU behavior" if EXPERT = "y"
+       default n
+       depends on TRACING
+       ---help---
+         Makes it possible generate events  showing the activity and the
+         behavior of the RCU subsystem.
+
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"
 	default DEBUG
