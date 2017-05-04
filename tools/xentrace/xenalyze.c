@@ -8269,9 +8269,10 @@ void pm_process(struct pcpu_info *p) {
         break;
     case TRC_PM_IDLE_ENTRY:
         if (opt.dump_all )
-            printf(" %s pm_idle_start c%d\n",
+            printf(" %s pm_idle_start c%d, pm_tick=%u, exp=%dus, pred=%dus\n",
                    ri->dump_header,
-                   ri->d[0]);
+                   ri->d[0], ri->d[1],
+                   ri->d[2], ri->d[3]);
         if ( ri->d[0] <= CSTATE_MAX )
         {
             p->power_state=ri->d[0];
@@ -8280,9 +8281,22 @@ void pm_process(struct pcpu_info *p) {
         break;
     case TRC_PM_IDLE_EXIT:
         if (opt.dump_all )
-            printf(" %s pm_idle_end c%d\n",
-                   ri->dump_header,
-                   ri->d[0]);
+        {
+            int i;
+
+            printf(" %s pm_idle_end c%d pm_tick=%u",
+                   ri->dump_header, ri->d[0], ri->d[1]);
+            printf(", irr_status=%d", ri->d[2]);
+            for (i = 3; i <= 5; i++)
+            {
+                if (ri->d[i] == 0)
+                    break;
+                printf(",%d", ri->d[i]);
+            }
+            if (i == 6)
+                printf(",...");
+            printf("\n");
+        }
         if ( p->power_state != ri->d[0]
              && p->power_state != CSTATE_INVALID )
             printf("Strange, pm_idle_end %d, power_state %d!\n",
