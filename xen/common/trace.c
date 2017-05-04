@@ -311,7 +311,7 @@ static int tb_set_size(unsigned int pages)
 
 int trace_will_trace_event(u32 event)
 {
-    if ( !tb_init_done )
+    if ( likely(!tb_init_done) )
         return 0;
 
     /*
@@ -691,7 +691,8 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
     unsigned int extra_word;
     bool_t started_below_highwater;
 
-    if( !tb_init_done )
+    /* If the event is not interesting, bail, as early as possible */
+    if ( (tb_event_mask & event) == 0 )
         return;
 
     /* Convert byte count into word count, rounding up */
@@ -704,9 +705,6 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
 
     /* Round size up to nearest word */
     extra = extra_word * sizeof(u32);
-
-    if ( (tb_event_mask & event) == 0 )
-        return;
 
     /* match class */
     if ( ((tb_event_mask >> TRC_CLS_SHIFT) & (event >> TRC_CLS_SHIFT)) == 0 )
