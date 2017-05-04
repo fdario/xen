@@ -205,6 +205,15 @@
 0x0080200d  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  irq_disable [ from = 0x%(2)08x%(1)08x ]
 0x0080200e  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  irq_enable  [ from = 0x%(2)08x%(1)08x ]
 
+0x01001001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_force_qstate [ ]
+0x01001002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_call [ fn = 0x%(2)08x%(1)08x ]
+0x01001003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_start_batch [ CPU mask: 0x%(6)08x%(5)08x%(4)08x%(3)08x%(2)08x%(1)08x ]
+0x01001004  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_do_batch [ fn = 0x%(2)08x%(1)08x, qlen = 0x%(4)08x%(3)08x ]
+0x01001005  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_cpu_quiet [ ]
+0x01001006  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_check_qstate [ pending = %(d)d ]
+0x01001007  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_do_callbacks [ ]
+0x01001008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rcu_pending [ %(1)d ]
+
 0x00084001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  hpet create [ tn = %(1)d, irq = %(2)d, delta = 0x%(4)08x%(3)08x, period = 0x%(6)08x%(5)08x ]
 0x00084002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  pit create [ delta = 0x%(1)016x, period = 0x%(2)016x ]
 0x00084003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtc create [ delta = 0x%(1)016x , period = 0x%(2)016x ]

@@ -13,6 +13,7 @@
 #define TRC_PV_MAIN      5
 #define TRC_SHADOW_MAIN  6
 #define TRC_HW_MAIN      7
+#define TRC_XEN_MAIN     8
 
 #define TRC_LOST_RECORDS_END    (TRC_GEN + 50)
 

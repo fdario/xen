@@ -1752,7 +1752,8 @@ enum {
     TOPLEVEL_PV,
     TOPLEVEL_SHADOW,
     TOPLEVEL_HW,
-    TOPLEVEL_MAX=TOPLEVEL_HW+1,
+    TOPLEVEL_XEN,
+    TOPLEVEL_MAX=TOPLEVEL_XEN+1,
 };
 
 char * toplevel_name[TOPLEVEL_MAX] = {
@@ -1764,6 +1765,7 @@ char * toplevel_name[TOPLEVEL_MAX] = {
     [TOPLEVEL_PV]="pv",
     [TOPLEVEL_SHADOW]="shadow",
     [TOPLEVEL_HW]="hw",
+    [TOPLEVEL_XEN]="xen",
 };
 
 struct trace_volume {
@@ -8588,6 +8590,100 @@ void irq_process(struct pcpu_info *p) {
     }
 }
 
+void rcu_process(struct pcpu_info *p) {
+    struct record_info *ri = &p->ri;
+
+    switch ( ri->event )
+    {
+    case TRC_XEN_RCU_FORCE_QSTATE:
+    {
+        if ( opt.dump_all )
+            printf(" %s rcu_force_quiescent_state\n",
+                   ri->dump_header);
+        break;
+    }
+    case TRC_XEN_RCU_CALL_RCU:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+            printf(" %s rcu_call fn=%p\n",
+                   ri->dump_header, (void*)r->addr);
+        break;
+    }
+    case TRC_XEN_RCU_DO_BATCH:
+    {
+        struct {
+            uint64_t addr;
+            int64_t qlen;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+            printf(" %s rcu_do_batch, fn=%p, qlen=%ld\n",
+                   ri->dump_header, (void*)r->addr, r->qlen);
+        break;
+    }
+    case TRC_XEN_RCU_START_BATCH:
+    {
+        struct {
+            uint32_t mask[6];
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            int i = 5;
+
+            while ( i >= 0 && !r->mask[i] ) i--;
+            printf(" %s rcu_start_batch, cpumask 0x", ri->dump_header);
+            for ( ; i >= 0 ; i-- )
+                printf("%08x", r->mask[i]);
+            printf("\n");
+        }
+    }
+    case TRC_XEN_RCU_CPU_QUIET:
+    {
+        if ( opt.dump_all )
+            printf(" %s rcu_cpu_quiet\n", ri->dump_header);
+        break;
+    }
+    case TRC_XEN_RCU_CHECK_QSTATE:
+    {
+        struct {
+            uint32_t qs_pending;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+            printf(" %s rcu_check_quiesc_state, qs_pending=%u\n",
+                   ri->dump_header, r->qs_pending);
+        break;
+    }
+    case TRC_XEN_RCU_DO_CALLBKS:
+    {
+        if ( opt.dump_all )
+            printf(" %s rcu_process_callbacks\n", ri->dump_header);
+        break;
+    }
+    case TRC_XEN_RCU_PENDING:
+    {
+        struct {
+            uint32_t pending;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+            printf(" %s rcu_pending? %s\n",
+                   ri->dump_header,
+                   r->pending ? "yes" : "no");
+        break;
+    }
+    default:
+        if( opt.dump_all )
+            dump_generic(stdout, ri);
+        break;
+    }
+}
+
 #define TRC_HW_SUB_PM 1
 #define TRC_HW_SUB_IRQ 2
 void hw_process(struct pcpu_info *p)
@@ -8604,6 +8700,19 @@ void hw_process(struct pcpu_info *p)
         break;
     }
 
+}
+
+#define TRC_XEN_SUB_RCU 1
+void xen_process(struct pcpu_info *p)
+{
+    struct record_info *ri = &p->ri;
+
+    switch(ri->evt.sub)
+    {
+    case TRC_XEN_SUB_RCU:
+        rcu_process(p);
+        break;
+    }
 }
 
 #define TRC_DOM0_SUB_DOMOPS 1
@@ -9463,6 +9572,9 @@ void process_record(struct pcpu_info *p) {
             break;
         case TRC_HW_MAIN:
             hw_process(p);
+            break;
+        case TRC_XEN_MAIN:
+            xen_process(p);
             break;
         case TRC_DOM0OP_MAIN:
             dom0_process(p);
