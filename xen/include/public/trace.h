@@ -96,6 +96,7 @@
 /* Trace subclasses for Xen internals */
 #define TRC_XEN_RCU         0x01001000   /* RCU traces */
 #define TRC_XEN_SIRQ        0x01002000   /* Traces relating to softirqs */
+#define TRC_XEN_TSKLT       0x01004000   /* Traces relating to tasklets */
 
 /* Trace events per class */
 #define TRC_LOST_RECORDS        (TRC_GEN + 1)
@@ -298,6 +299,14 @@
 #define TRC_XEN_SIRQ_RAISE_MASK       (TRC_XEN_SIRQ + 0x2)
 #define TRC_XEN_SIRQ_RAISE_CPU        (TRC_XEN_SIRQ + 0x3)
 #define TRC_XEN_SIRQ_RAISE            (TRC_XEN_SIRQ + 0x4)
+
+/* Trace events for tasklets */
+#define TRC_XEN_TASKLET_ENQUEUE       (TRC_XEN_TSKLT + 0x1)
+#define TRC_XEN_TASKLET_SCHEDULE      (TRC_XEN_TSKLT + 0x2)
+#define TRC_XEN_TASKLET_WORK          (TRC_XEN_TSKLT + 0x3)
+#define TRC_XEN_TASKLET_KILL          (TRC_XEN_TSKLT + 0x4)
+#define TRC_XEN_TASKLET_INIT          (TRC_XEN_TSKLT + 0x5)
+#define TRC_XEN_TASKLET_MIGR          (TRC_XEN_TSKLT + 0x6)
 
 /*
  * Event Flags

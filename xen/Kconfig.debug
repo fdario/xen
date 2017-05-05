@@ -132,6 +132,14 @@ config TRACE_SOFTIRQS
 	  Makes it possible to generate events related to raising and
           handling of softirqs within Xen.
 
+config TRACE_TASKLETS
+	bool "Trace when tasklets are queued and scheduled" if EXPERT = "y"
+	default n
+	depends on TRACING
+	---help---
+	  Make it possible to generate events related to scheduling,
+          queueing and running of tasklets within Xen.
+
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"
 	default DEBUG

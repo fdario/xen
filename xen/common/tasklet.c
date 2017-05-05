@@ -30,9 +30,86 @@ static DEFINE_PER_CPU(struct list_head, softirq_tasklet_list);
 /* Protects all lists and tasklet structures. */
 static DEFINE_SPINLOCK(tasklet_lock);
 
+#ifdef CONFIG_TRACE_TASKLETS
+static inline void trace_enqueue(const struct tasklet *t)
+{
+    uint64_t addr;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    addr = (uint64_t)t->func;
+    __trace_var(TRC_XEN_TASKLET_ENQUEUE, 0, sizeof(addr), &addr);
+}
+static inline void trace_schedule(const struct tasklet *t)
+{
+    struct {
+        uint64_t addr;
+        int16_t sched_on, is_sirq;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t->func;
+    d.sched_on = t->scheduled_on;
+    d.is_sirq = t->is_softirq;
+    __trace_var(TRC_XEN_TASKLET_SCHEDULE, 1, sizeof(d), &d);
+}
+static inline void trace_work(const struct tasklet *t)
+{
+    uint64_t addr;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    addr = (uint64_t)t->func;
+    __trace_var(TRC_XEN_TASKLET_WORK, 1, sizeof(addr), &addr);
+}
+static inline void trace_kill(const struct tasklet *t)
+{
+    struct {
+        uint64_t addr;
+        int16_t sched_on, is_run;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t->func;
+    d.sched_on = t->scheduled_on;
+    d.is_run = t->is_running;
+    __trace_var(TRC_XEN_TASKLET_KILL, 0, sizeof(d), &d);
+}
+static inline void trace_init(const struct tasklet *t)
+{
+    struct {
+        uint64_t addr;
+        uint32_t is_sirq;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t->func;
+    d.is_sirq = t->is_softirq;
+    __trace_var(TRC_XEN_TASKLET_INIT, 0, sizeof(d), &d);
+}
+#define trace_migrate()      TRACE_0D(TRC_XEN_TASKLET_MIGR);
+#else
+#define trace_enqueue(t)     do {} while ( 0 )
+#define trace_schedule(t)    do {} while ( 0 )
+#define trace_work(t)        do {} while ( 0 )
+#define trace_kill(t)        do {} while ( 0 )
+#define trace_migrate()      do {} while ( 0 )
+#define trace_init(t)        do {} while ( 0 )
+#endif /* TRACE_TASKLETS */
+
 static void tasklet_enqueue(struct tasklet *t)
 {
     unsigned int cpu = t->scheduled_on;
+
+    trace_enqueue(t);
 
     if ( t->is_softirq )
     {
@@ -60,6 +137,7 @@ void tasklet_schedule_on_cpu(struct tasklet *t, unsigned int cpu)
     if ( tasklets_initialised && !t->is_dead )
     {
         t->scheduled_on = cpu;
+        trace_schedule(t);
         if ( !t->is_running )
         {
             list_del(&t->list);
@@ -91,6 +169,7 @@ static void do_tasklet_work(unsigned int cpu, struct list_head *list)
 
     spin_unlock_irq(&tasklet_lock);
     sync_local_execstate();
+    trace_work(t);
     t->func(t->data);
     spin_lock_irq(&tasklet_lock);
 
@@ -158,6 +237,7 @@ void tasklet_kill(struct tasklet *t)
         list_del_init(&t->list);
     }
 
+    trace_kill(t);
     t->scheduled_on = -1;
     t->is_dead = 1;
 
@@ -178,6 +258,11 @@ static void migrate_tasklets_from_cpu(unsigned int cpu, struct list_head *list)
 
     spin_lock_irqsave(&tasklet_lock, flags);
 
+    if ( list_empty(list) )
+        goto out;
+
+    trace_migrate();
+
     while ( !list_empty(list) )
     {
         t = list_entry(list->next, struct tasklet, list);
@@ -187,6 +272,7 @@ static void migrate_tasklets_from_cpu(unsigned int cpu, struct list_head *list)
         tasklet_enqueue(t);
     }
 
+ out:
     spin_unlock_irqrestore(&tasklet_lock, flags);
 }
 
@@ -198,6 +284,7 @@ void tasklet_init(
     t->scheduled_on = -1;
     t->func = func;
     t->data = data;
+    trace_init(t);
 }
 
 void softirq_tasklet_init(
