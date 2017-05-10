@@ -8762,6 +8762,94 @@ void softirq_process(struct pcpu_info *p) {
     }
 }
 
+void tasklet_process(struct pcpu_info *p) {
+    struct record_info *ri = &p->ri;
+
+    switch ( ri->event )
+    {
+    case TRC_XEN_TASKLET_ENQUEUE:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s tasklet_enqueue fn=%p\n",
+                   ri->dump_header, (void*)r->addr);
+        }
+        break;
+    }
+    case TRC_XEN_TASKLET_SCHEDULE:
+    {
+        struct {
+            uint64_t addr;
+            int16_t sched_on, is_sirq;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s tasklet_schedule fn=%p, sched_on=%d%s\n",
+                   ri->dump_header, (void*)r->addr, r->sched_on,
+                   r->is_sirq ? " (softirq)" : "");
+        }
+        break;
+    }
+    case TRC_XEN_TASKLET_WORK:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s tasklet_do_work fn=%p\n",
+                   ri->dump_header, (void*)r->addr);
+        }
+        break;
+    }
+    case TRC_XEN_TASKLET_KILL:
+    {
+        struct {
+            uint64_t addr;
+            int16_t sched_on, is_run;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s tasklet_kill fn=%p\n, sched_on=%d, is_running=%d\n",
+                   ri->dump_header, (void*)r->addr, r->sched_on, r->is_run);
+        }
+        break;
+    }
+    case TRC_XEN_TASKLET_INIT:
+    {
+        struct {
+            uint64_t addr;
+            uint32_t is_sirq;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s tasklet_init fn=%p%s\n",
+                   ri->dump_header, (void*)r->addr,
+                   r->is_sirq ? ", (softirq)" : "");
+        }
+        break;
+    }
+    case TRC_XEN_TASKLET_MIGR:
+    {
+        if ( opt.dump_all )
+            printf(" %s tasklet_migrate\n", ri->dump_header);
+        break;
+    }
+    default:
+        if( opt.dump_all )
+            dump_generic(stdout, ri);
+        break;
+    }
+}
+
 #define TRC_HW_SUB_PM 1
 #define TRC_HW_SUB_IRQ 2
 void hw_process(struct pcpu_info *p)
@@ -8782,6 +8870,7 @@ void hw_process(struct pcpu_info *p)
 
 #define TRC_XEN_SUB_RCU 1
 #define TRC_XEN_SUB_SIRQ 2
+#define TRC_XEN_SUB_TSKLT 4
 void xen_process(struct pcpu_info *p)
 {
     struct record_info *ri = &p->ri;
@@ -8793,6 +8882,9 @@ void xen_process(struct pcpu_info *p)
         break;
     case TRC_XEN_SUB_SIRQ:
         softirq_process(p);
+        break;
+    case TRC_XEN_SUB_TSKLT:
+        tasklet_process(p);
         break;
     }
 }

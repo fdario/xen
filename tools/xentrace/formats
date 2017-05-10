@@ -219,6 +219,13 @@
 0x01002003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_raise_cpu [ nr:cpu = 0x%(1)08x ]
 0x01002004  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  softirq_raise [ nr = %(1)d ]
 
+0x01004001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_enqueue [ fn = 0x%(2)08x%(1)08x ]
+0x01004002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_schedule [ fn = 0x%(2)08x%(1)08x, is_sirq:sched_on = 0x%(3)08x ]
+0x01004003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_work [ fn = 0x%(2)08x%(1)08x ]
+0x01004004  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_kill [ fn = 0x%(2)08x%(1)08x, is_run:sched_on = 0x%(3)08x ]
+0x01004005  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_init [ fn = 0x%(2)08x%(1)08x, is_sirq = %(3)d ]
+0x01004006  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_migr [ ]
+
 0x00084001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  hpet create [ tn = %(1)d, irq = %(2)d, delta = 0x%(4)08x%(3)08x, period = 0x%(6)08x%(5)08x ]
 0x00084002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  pit create [ delta = 0x%(1)016x, period = 0x%(2)016x ]
 0x00084003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtc create [ delta = 0x%(1)016x , period = 0x%(2)016x ]
