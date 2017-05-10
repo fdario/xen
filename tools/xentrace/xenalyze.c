@@ -8850,6 +8850,143 @@ void tasklet_process(struct pcpu_info *p) {
     }
 }
 
+void timer_process(struct pcpu_info *p) {
+    struct record_info *ri = &p->ri;
+
+    switch ( ri->event )
+    {
+    case TRC_XEN_TIMER_RMENTRY:
+    {
+        struct {
+            uint64_t addr;
+            uint16_t status, cpu;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_rm_entry t=%p, cpu=%u, status=0x%x\n",
+                   ri->dump_header, (void*)r->addr, r->cpu, r->status);
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_ADDENTRY:
+    {
+        struct {
+            uint64_t addr;
+            uint16_t status, cpu;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_add_entry t=%p, cpu=%u, status=0x%x\n",
+                   ri->dump_header, (void*)r->addr, r->cpu, r->status);
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_SET:
+    {
+        struct {
+            uint64_t addr, addr_fn;
+            int64_t expires;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_set t=%p, fn=%p, expires_in=%ld.%luus\n",
+                   ri->dump_header, (void*)r->addr, (void*)r->addr_fn,
+                   (long int)(r->expires / 1000),
+                   (unsigned long int)labs(r->expires % 1000));
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_STOP:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_stop t=%p\n", ri->dump_header, (void*)r->addr);
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_MIGRATE:
+    {
+        struct {
+            uint64_t addr;
+            uint16_t new_cpu, old_cpu;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_migrate t=%p, cpu=%u, new_cpu=%u\n",
+                   ri->dump_header, (void*)r->addr, r->old_cpu, r->new_cpu);
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_KILL:
+    {
+        struct {
+            uint64_t addr;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_kill t=%p\n", ri->dump_header, (void*)r->addr);
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_EXEC:
+    {
+        struct {
+            uint64_t addr;
+            int64_t tardiness;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_exec t=%p, tardiness=%ld.%luus\n",
+                   ri->dump_header, (void*)r->addr,
+                   (long int)(r->tardiness / 1000),
+                   (unsigned long int)labs(r->tardiness % 1000));
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_REPRGR:
+    {
+        struct {
+            uint64_t deadline;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_reprogr deadline=%lu.%luus\n",
+                   ri->dump_header, (unsigned long int)(r->deadline / 1000),
+                   (unsigned long int)(r->deadline % 1000));
+        }
+        break;
+    }
+    case TRC_XEN_TIMER_HOVERFL:
+    {
+        struct {
+            uint16_t new_limit, old_limit;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s timer_heap_overflow, limit=%u, new_limit=%u\n",
+                   ri->dump_header, r->old_limit, r->new_limit);
+        }
+        break;
+    }
+    default:
+        if( opt.dump_all )
+            dump_generic(stdout, ri);
+        break;
+    }
+}
+
 #define TRC_HW_SUB_PM 1
 #define TRC_HW_SUB_IRQ 2
 void hw_process(struct pcpu_info *p)
@@ -8871,6 +9008,7 @@ void hw_process(struct pcpu_info *p)
 #define TRC_XEN_SUB_RCU 1
 #define TRC_XEN_SUB_SIRQ 2
 #define TRC_XEN_SUB_TSKLT 4
+#define TRC_XEN_SUB_TIMER 8
 void xen_process(struct pcpu_info *p)
 {
     struct record_info *ri = &p->ri;
@@ -8885,6 +9023,9 @@ void xen_process(struct pcpu_info *p)
         break;
     case TRC_XEN_SUB_TSKLT:
         tasklet_process(p);
+        break;
+    case TRC_XEN_SUB_TIMER:
+        timer_process(p);
         break;
     }
 }

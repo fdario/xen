@@ -226,6 +226,16 @@
 0x01004005  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_init [ fn = 0x%(2)08x%(1)08x, is_sirq = %(3)d ]
 0x01004006  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  tasklet_migr [ ]
 
+0x01008001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_rmentry [ t = 0x%(2)08x%(1)08x, cpu:status = %(3)08x ]
+0x01008002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_addentry [ t = 0x%(2)08x%(1)08x, cpu:status = %(3)08x ]
+0x01008003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_set [ t = 0x%(2)08x%(1)08x, fn = 0x%(4)08x%(3)08x exp=0x%(6)08x%(5)08x ]
+0x01008004  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_stop [ t = 0x%(2)08x%(1)08x ]
+0x01008005  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_migr [ t = 0x%(2)08x%(1)08x ]
+0x01008006  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_kill [ t = 0x%(2)08x%(1)08x ]
+0x01008007  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_exec [ t = 0x%(2)08x%(1)08x, tard=0x%(4)08x%(3)08x ]
+0x01008008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_reprogr [ deadline=0x%(2)08x%(1)08x ]
+0x01008009  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  timer_hoverfl [ old_lim:new_lim=0x%(1)08x ]
+
 0x00084001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  hpet create [ tn = %(1)d, irq = %(2)d, delta = 0x%(4)08x%(3)08x, period = 0x%(6)08x%(5)08x ]
 0x00084002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  pit create [ delta = 0x%(1)016x, period = 0x%(2)016x ]
 0x00084003  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtc create [ delta = 0x%(1)016x , period = 0x%(2)016x ]
