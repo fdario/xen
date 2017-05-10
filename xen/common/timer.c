@@ -43,6 +43,136 @@ static DEFINE_RCU_READ_LOCK(timer_cpu_read_lock);
 
 DEFINE_PER_CPU(s_time_t, timer_deadline);
 
+#ifdef CONFIG_TRACE_TIMERS
+static inline void trace_rm_entry(const struct timer *t)
+{
+    struct {
+        uint64_t addr;
+        uint16_t status, cpu;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t;
+    d.cpu = t->cpu;
+    d.status = t->status;
+    __trace_var(TRC_XEN_TIMER_RMENTRY, 0, sizeof(d), &d);
+}
+static inline void trace_add_entry(const struct timer *t)
+{
+    struct {
+        uint64_t addr;
+        uint16_t status, cpu;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t;
+    d.cpu = t->cpu;
+    d.status = t->status;
+    __trace_var(TRC_XEN_TIMER_ADDENTRY, 0, sizeof(d), &d);
+}
+static inline void trace_set(const struct timer *t)
+{
+    struct {
+        uint64_t addr, addr_fn;
+        int64_t expires_in;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t;
+    d.addr_fn = (uint64_t)t->function;
+    d.expires_in = t->expires - NOW();
+    __trace_var(TRC_XEN_TIMER_SET, 1, sizeof(d), &d);
+}
+static inline void trace_stop(const struct timer *t)
+{
+    uint64_t addr;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    addr = (uint64_t)t;
+    __trace_var(TRC_XEN_TIMER_STOP, 0, sizeof(addr), &addr);
+}
+static inline void trace_migrate(const struct timer *t, unsigned int cpu)
+{
+    struct {
+        uint64_t addr;
+        uint16_t new_cpu, old_cpu;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t;
+    d.old_cpu = t->cpu;
+    d.new_cpu = cpu;
+    __trace_var(TRC_XEN_TIMER_MIGRATE, 0, sizeof(d), &d);
+}
+static inline void trace_kill(const struct timer *t)
+{
+    uint64_t addr;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    addr = (uint64_t)t;
+    __trace_var(TRC_XEN_TIMER_KILL, 0, sizeof(addr), &addr);
+}
+static inline void trace_exec(const struct timer *t)
+{
+    struct {
+        uint64_t addr;
+        int64_t tardiness;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.addr = (uint64_t)t;
+    d.tardiness = NOW() - t->expires;
+    __trace_var(TRC_XEN_TIMER_EXEC, 1, sizeof(d), &d);
+}
+static inline void trace_reprogr(s_time_t n, s_time_t d)
+{
+    uint64_t deadline = d - n;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    __trace_var(TRC_XEN_TIMER_REPRGR, 1, sizeof(deadline), &deadline);
+}
+static inline void trace_hoverfl(unsigned int old_lim, unsigned int new_lim)
+{
+    struct {
+        uint16_t new_limit, old_limit;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.old_limit = old_lim;
+    d.new_limit = new_lim;
+    __trace_var(TRC_XEN_TIMER_EXEC, 0, sizeof(d), &d);
+}
+#define trace_hoverfl(o, n) TRACE_2D(TRC_XEN_TIMER_HOVERFL, o, n)
+#else /* !TRACE_TIMERS */
+#define trace_rm_entry(t)   do {} while ( 0 )
+#define trace_add_entry(t)  do {} while ( 0 )
+#define trace_set(t)        do {} while ( 0 )
+#define trace_stop(t)       do {} while ( 0 )
+#define trace_migrate(t, c) do {} while ( 0 )
+#define trace_kill(t)       do {} while ( 0 )
+#define trace_exec(t)       do {} while ( 0 )
+#define trace_reprogr(n, d) do {} while ( 0 )
+#define trace_hoverfl(o, n) do {} while ( 0 )
+#endif /* TRACE_TIMERS */
+
 /****************************************************************************
  * HEAP OPERATIONS.
  */
@@ -175,6 +305,8 @@ static int remove_entry(struct timer *t)
     struct timers *timers = &per_cpu(timers, t->cpu);
     int rc;
 
+    trace_rm_entry(t);
+
     switch ( t->status )
     {
     case TIMER_STATUS_in_heap:
@@ -204,11 +336,14 @@ static int add_entry(struct timer *t)
     t->status = TIMER_STATUS_in_heap;
     rc = add_to_heap(timers->heap, t);
     if ( t->heap_offset != 0 )
-        return rc;
+        goto out;
 
     /* Fall back to adding to the slower linked list. */
     t->status = TIMER_STATUS_in_list;
-    return add_to_list(&timers->list, t);
+    rc = add_to_list(&timers->list, t);
+ out:
+    trace_add_entry(t);
+    return rc;
 }
 
 static inline void activate_timer(struct timer *timer)
@@ -307,6 +442,8 @@ void set_timer(struct timer *timer, s_time_t expires)
     if ( !timer_lock_irqsave(timer, flags) )
         return;
 
+    trace_set(timer);
+
     if ( active_timer(timer) )
         deactivate_timer(timer);
 
@@ -325,6 +462,8 @@ void stop_timer(struct timer *timer)
     if ( !timer_lock_irqsave(timer, flags) )
         return;
 
+    trace_stop(timer);
+
     if ( active_timer(timer) )
         deactivate_timer(timer);
 
@@ -335,7 +474,6 @@ void stop_timer(struct timer *timer)
 void migrate_timer(struct timer *timer, unsigned int new_cpu)
 {
     unsigned int old_cpu;
-    bool_t active;
     unsigned long flags;
 
     rcu_read_lock(&timer_cpu_read_lock);
@@ -369,15 +507,16 @@ void migrate_timer(struct timer *timer, unsigned int new_cpu)
 
     rcu_read_unlock(&timer_cpu_read_lock);
 
-    active = active_timer(timer);
-    if ( active )
+    trace_migrate(timer, new_cpu);
+
+    if ( active_timer(timer) )
         deactivate_timer(timer);
 
     list_del(&timer->inactive);
     write_atomic(&timer->cpu, new_cpu);
     list_add(&timer->inactive, &per_cpu(timers, new_cpu).inactive);
 
-    if ( active )
+    if ( active_timer(timer) )
         activate_timer(timer);
 
     spin_unlock(&per_cpu(timers, old_cpu).lock);
@@ -394,6 +533,8 @@ void kill_timer(struct timer *timer)
 
     if ( !timer_lock_irqsave(timer, flags) )
         return;
+
+    trace_kill(timer);
 
     if ( active_timer(timer) )
         deactivate_timer(timer);
@@ -421,6 +562,7 @@ static void execute_timer(struct timers *ts, struct timer *t)
 
     ts->running = t;
     spin_unlock_irq(&ts->lock);
+    trace_exec(t);
     (*fn)(data);
     spin_lock_irq(&ts->lock);
     ts->running = NULL;
@@ -443,6 +585,7 @@ static void timer_softirq_action(void)
         int old_limit = GET_HEAP_LIMIT(heap);
         int new_limit = ((old_limit + 1) << 4) - 1;
         struct timer **newheap = xmalloc_array(struct timer *, new_limit + 1);
+
         if ( newheap != NULL )
         {
             spin_lock_irq(&ts->lock);
@@ -454,6 +597,7 @@ static void timer_softirq_action(void)
                 xfree(heap);
             heap = newheap;
         }
+        trace_hoverfl(old_limit, new_limit);
     }
 
     spin_lock_irq(&ts->lock);
@@ -494,6 +638,8 @@ static void timer_softirq_action(void)
     now = NOW();
     this_cpu(timer_deadline) =
         (deadline == STIME_MAX) ? 0 : MAX(deadline, now + timer_slop);
+
+    trace_reprogr(now, this_cpu(timer_deadline));
 
     if ( !reprogram_timer(this_cpu(timer_deadline)) )
         raise_softirq(TIMER_SOFTIRQ);

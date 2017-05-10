@@ -140,6 +140,15 @@ config TRACE_TASKLETS
 	  Make it possible to generate events related to scheduling,
           queueing and running of tasklets within Xen.
 
++config TRACE_TIMERS
+       bool "Trace when timers are armed and fires" if EXPERT = "y"
+       default n
+       depends on TRACING
+       ---help---
+         Makes it possible to generate events related to the timers
+         subsystems, such as, creation, initialization, queueing,
+         firing and removal of timers.
+
 config VERBOSE_DEBUG
 	bool "Verbose debug messages"
 	default DEBUG

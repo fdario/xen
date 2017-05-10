@@ -97,6 +97,7 @@
 #define TRC_XEN_RCU         0x01001000   /* RCU traces */
 #define TRC_XEN_SIRQ        0x01002000   /* Traces relating to softirqs */
 #define TRC_XEN_TSKLT       0x01004000   /* Traces relating to tasklets */
+#define TRC_XEN_TIMER       0x01008000   /* Trace relating to timer events */
 
 /* Trace events per class */
 #define TRC_LOST_RECORDS        (TRC_GEN + 1)
@@ -307,6 +308,17 @@
 #define TRC_XEN_TASKLET_KILL          (TRC_XEN_TSKLT + 0x4)
 #define TRC_XEN_TASKLET_INIT          (TRC_XEN_TSKLT + 0x5)
 #define TRC_XEN_TASKLET_MIGR          (TRC_XEN_TSKLT + 0x6)
+
+/* Trace events for timers */
+#define TRC_XEN_TIMER_RMENTRY         (TRC_XEN_TIMER + 0x1)
+#define TRC_XEN_TIMER_ADDENTRY        (TRC_XEN_TIMER + 0x2)
+#define TRC_XEN_TIMER_SET             (TRC_XEN_TIMER + 0x3)
+#define TRC_XEN_TIMER_STOP            (TRC_XEN_TIMER + 0x4)
+#define TRC_XEN_TIMER_MIGRATE         (TRC_XEN_TIMER + 0x5)
+#define TRC_XEN_TIMER_KILL            (TRC_XEN_TIMER + 0x6)
+#define TRC_XEN_TIMER_EXEC            (TRC_XEN_TIMER + 0x7)
+#define TRC_XEN_TIMER_REPRGR          (TRC_XEN_TIMER + 0x8)
+#define TRC_XEN_TIMER_HOVERFL         (TRC_XEN_TIMER + 0x9)
 
 /*
  * Event Flags
