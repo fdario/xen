@@ -100,11 +100,15 @@ static void trace_irq_mask(u32 event, int irq, int vector, cpumask_t *mask)
         unsigned int irq:16, vec:16;
         unsigned int mask[6];
     } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
     d.irq = irq;
     d.vec = vector;
     memset(d.mask, 0, sizeof(d.mask));
     memcpy(d.mask, mask, min(sizeof(d.mask), sizeof(cpumask_t)));
-    trace_var(event, 1, sizeof(d), &d);
+    __trace_var(event, 1, sizeof(d), &d);
 }
 
 static int __init __bind_irq_vector(int irq, int vector, const cpumask_t *cpu_mask)
@@ -804,23 +808,54 @@ void alloc_direct_apic_vector(
     spin_unlock(&lock);
 }
 
+static inline void trace_irq_handled(int irq, uint64_t time)
+{
+    struct __packed {
+        int32_t irq;
+        uint64_t time;
+    } d;
+
+    if ( likely(!tb_init_done) )
+        return;
+
+    d.irq = irq;
+    d.time = time;
+    __trace_var(TRC_HW_IRQ_HANDLED, 0, sizeof(d), &d);
+}
+
 void do_IRQ(struct cpu_user_regs *regs)
 {
     struct irqaction *action;
-    uint32_t          tsc_in;
-    struct irq_desc  *desc;
+    uint64_t          tsc_in = 0;
+    struct irq_desc  *desc = NULL;
     unsigned int      vector = (u8)regs->entry_vector;
     int irq = __get_cpu_var(vector_irq[vector]);
     struct cpu_user_regs *old_regs = set_irq_regs(regs);
     
     perfc_incr(irqs);
     this_cpu(irq_count)++;
+    TRACE_1D(TRC_HW_IRQ_ENTER, irq);
     irq_enter();
 
-    if (irq < 0) {
-        if (direct_apic_vector[vector] != NULL) {
+    if (irq < 0)
+    {
+        if (direct_apic_vector[vector] != NULL)
+        {
+            if ( unlikely(tb_init_done) )
+            {
+                struct __packed {
+                    uint32_t vec;
+                    uint64_t handler;
+                } d;
+
+                d.vec = vector;
+                d.handler = (uint64_t)direct_apic_vector[vector];
+                __trace_var(TRC_HW_IRQ_DIRECT_VECTOR, 0, sizeof(d), &d);
+            }
             (*direct_apic_vector[vector])(regs);
-        } else {
+        }
+        else
+        {
             const char *kind = ", LAPIC";
 
             if ( apic_isr_read(vector) )
@@ -884,9 +919,13 @@ void do_IRQ(struct cpu_user_regs *regs)
             desc->rl_quantum_start = now;
         }
 
-        tsc_in = tb_init_done ? get_cycles() : 0;
+        if ( unlikely(tb_init_done) )
+        {
+            __trace_var(TRC_HW_IRQ_GUEST, 0, sizeof(irq), &irq);
+            tsc_in = get_cycles();
+        }
         __do_IRQ_guest(irq);
-        TRACE_3D(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
+        trace_irq_handled(irq, get_cycles() - tsc_in);
         goto out_no_end;
     }
 
@@ -907,9 +946,10 @@ void do_IRQ(struct cpu_user_regs *regs)
     {
         desc->status &= ~IRQ_PENDING;
         spin_unlock_irq(&desc->lock);
-        tsc_in = tb_init_done ? get_cycles() : 0;
+        if ( unlikely(tb_init_done) )
+            tsc_in = get_cycles();
         action->handler(irq, action->dev_id, regs);
-        TRACE_3D(TRC_HW_IRQ_HANDLED, irq, tsc_in, get_cycles());
+        trace_irq_handled(irq, get_cycles() - tsc_in);
         spin_lock_irq(&desc->lock);
     }
 
@@ -922,6 +962,7 @@ void do_IRQ(struct cpu_user_regs *regs)
     spin_unlock(&desc->lock);
  out_no_unlock:
     irq_exit();
+    TRACE_3D(TRC_HW_IRQ_EXIT, irq, desc == NULL ? -1 : desc->status, in_irq());
     set_irq_regs(old_regs);
 }
 

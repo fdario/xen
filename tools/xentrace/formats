@@ -197,7 +197,11 @@
 0x00802005  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  move_vector [ irq = %(1)d had vector 0x%(2)x on CPU%(3)d ]
 0x00802006  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  assign_vector [ irq = %(1)d = vector 0x%(2)x, CPU mask: 0x%(3)08x ]
 0x00802007  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  bogus_vector [ 0x%(1)x ]
-0x00802008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  do_irq [ irq = %(1)d, began = %(2)dus, ended = %(3)dus ]
+0x00802008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  irq_handled [ irq = %(1)d, dur = 0x%(3)08x%(2)08x ]
+0x00802009  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  direct_vector [ vector 0x%(1)x, handler = 0x%(3)08x%(2)08x ]
+0x0080200a  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  do_irq [ irq = %(1)d ]
+0x0080200b  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  do_guest_irq [ irq = %(1)d ]
+0x0080200c  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  irq_exit [ irq = %(1)d, status = 0x%(2)x, in_irq = %(3)d ]
 
 0x00084001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  hpet create [ tn = %(1)d, irq = %(2)d, delta = 0x%(4)08x%(3)08x, period = 0x%(6)08x%(5)08x ]
 0x00084002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  pit create [ delta = 0x%(1)016x, period = 0x%(2)016x ]

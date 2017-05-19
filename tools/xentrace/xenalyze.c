@@ -8380,19 +8380,45 @@ void irq_process(struct pcpu_info *p) {
         }
         break;
     }
+    case TRC_HW_IRQ_ENTER:
+    case TRC_HW_IRQ_GUEST:
+    {
+        struct {
+            int32_t irq;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s irq_%s, irq %x\n", ri->dump_header,
+                   ri->event == TRC_HW_IRQ_ENTER ? "enter" : "guest", r->irq);
+        }
+        break;
+    }
+    case TRC_HW_IRQ_DIRECT_VECTOR:
+    {
+        struct {
+            uint32_t vec;
+            uint64_t handler;
+        } __attribute__((packed)) *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s irq_direct, vec %x, handler = %p\n",
+                   ri->dump_header, r->vec, (void*)r->handler);
+        }
+        break;
+    }
     case TRC_HW_IRQ_HANDLED:
     {
         struct {
-            int irq, start_tsc, end_tsc;
-        } *r = (typeof(r))ri->d;
-        int arctime;
+            int32_t irq;
+            uint64_t arctime;
+        } __attribute__((packed)) *r = (typeof(r))ri->d;
 
-        arctime = r->end_tsc - r->start_tsc;
         if ( opt.dump_all )
         {
-            printf(" %s irq_handled irq %x %d (%d,%d)\n",
-                   ri->dump_header,
-                   r->irq, arctime, r->start_tsc, r->end_tsc);
+            printf(" %s irq_handled irq %x, %"PRIu64" cycles\n",
+                   ri->dump_header, r->irq, r->arctime);
         }
         if ( opt.scatterplot_irq )
         {
@@ -8404,6 +8430,22 @@ void irq_process(struct pcpu_info *p) {
                    (unsigned)r->irq,
                    t.s, t.ns,
                    p->pid);
+        }
+        break;
+    }
+    case TRC_HW_IRQ_EXIT:
+    {
+        struct {
+            int32_t irq, status;
+            uint32_t in_irq;
+        } *r = (typeof(r))ri->d;
+
+        if ( opt.dump_all )
+        {
+            printf(" %s irq_exit irq %x", ri->dump_header, r->irq);
+            if ( r->status != -1 )
+                printf(", status = 0x%x", r->status);
+            printf(", in_irq = %d\n", r->in_irq);
         }
         break;
     }

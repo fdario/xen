@@ -271,6 +271,10 @@
 #define TRC_HW_IRQ_ASSIGN_VECTOR      (TRC_HW_IRQ + 0x6)
 #define TRC_HW_IRQ_UNMAPPED_VECTOR    (TRC_HW_IRQ + 0x7)
 #define TRC_HW_IRQ_HANDLED            (TRC_HW_IRQ + 0x8)
+#define TRC_HW_IRQ_DIRECT_VECTOR      (TRC_HW_IRQ + 0x9)
+#define TRC_HW_IRQ_ENTER              (TRC_HW_IRQ + 0xA)
+#define TRC_HW_IRQ_GUEST              (TRC_HW_IRQ + 0xB)
+#define TRC_HW_IRQ_EXIT               (TRC_HW_IRQ + 0xC)
 
 /*
  * Event Flags
