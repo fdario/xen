@@ -506,7 +506,7 @@ struct csched2_vcpu {
 
     int credit;
 
-    s_time_t budget;
+    s_time_t budget, budget_quota;
     struct list_head parked_elem;      /* On the parked_vcpus list   */
 
     s_time_t start_time; /* When we were scheduled (used for credit) */
@@ -1627,8 +1627,16 @@ static bool vcpu_try_to_get_budget(struct csched2_vcpu *svc)
 
     if ( sdom->budget > 0 )
     {
-        svc->budget = sdom->budget;
-        sdom->budget = 0;
+        s_time_t budget;
+
+        /* Get our quote, if there's at least as much budget */
+        if ( likely(sdom->budget >= svc->budget_quota) )
+            budget = svc->budget_quota;
+        else
+            budget = sdom->budget;
+
+        svc->budget = budget;
+        sdom->budget -= budget;
     }
     else
     {
@@ -1841,6 +1849,7 @@ csched2_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     svc->tickled_cpu = -1;
 
     svc->budget = STIME_MAX;
+    svc->budget_quota = 0;
     INIT_LIST_HEAD(&svc->parked_elem);
 
     SCHED_STAT_CRANK(vcpu_alloc);
@@ -2548,9 +2557,32 @@ csched2_dom_cntl(
         /* Cap */
         if ( op->u.credit2.cap != 0 )
         {
+            struct csched2_vcpu *svc;
+            spinlock_t *lock;
+
             spin_lock(&sdom->budget_lock);
             sdom->tot_budget = (CSCHED2_BDGT_REPL_PERIOD / 100) * op->u.credit2.cap;
             spin_unlock(&sdom->budget_lock);
+
+            /*
+             * When trying to get some budget and run, each vCPU will grab
+             * from the pool 1/N (with N = nr of vCPUs of the domain) of
+             * the total budget. Roughly speaking, this means each vCPU will
+             * have at least one chance to run during every period.
+             */
+            for_each_vcpu ( d, v )
+            {
+                svc = csched2_vcpu(v);
+                lock = vcpu_schedule_lock(svc->vcpu);
+                /*
+                 * Too small quotas would in theory cause a lot of overhead,
+                 * which then won't happen because, in csched2_runtime(),
+                 * CSCHED2_MIN_TIMER is what would be used anyway.
+                 */
+                svc->budget_quota = max(sdom->tot_budget / sdom->nr_vcpus,
+                                        CSCHED2_MIN_TIMER);
+                vcpu_schedule_unlock(lock, svc->vcpu);
+            }
 
             if ( sdom->cap == 0 )
             {
@@ -2583,9 +2615,8 @@ csched2_dom_cntl(
                  */
                 for_each_vcpu ( d, v )
                 {
-                    struct csched2_vcpu *svc = csched2_vcpu(v);
-                    spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
-
+                    svc = csched2_vcpu(v);
+                    lock = vcpu_schedule_lock(svc->vcpu);
                     if ( v->is_running )
                     {
                         unsigned int cpu = v->processor;
@@ -2619,6 +2650,7 @@ csched2_dom_cntl(
                     vcpu_schedule_unlock(lock, svc->vcpu);
                 }
             }
+
             sdom->cap = op->u.credit2.cap;
         }
         else if ( sdom->cap != 0 )
@@ -2632,6 +2664,7 @@ csched2_dom_cntl(
                 spinlock_t *lock = vcpu_schedule_lock(svc->vcpu);
 
                 svc->budget = STIME_MAX;
+                svc->budget_quota = 0;
 
                 vcpu_schedule_unlock(lock, svc->vcpu);
             }
@@ -3266,7 +3299,8 @@ csched2_dump_vcpu(struct csched2_private *prv, struct csched2_vcpu *svc)
     printk(" credit=%" PRIi32" [w=%u]", svc->credit, svc->weight);
 
     if ( has_cap(svc) )
-        printk(" budget=%"PRI_stime, svc->budget);
+        printk(" budget=%"PRI_stime"(%"PRI_stime")",
+               svc->budget, svc->budget_quota);
 
     printk(" load=%"PRI_stime" (~%"PRI_stime"%%)", svc->avgload,
            (svc->avgload * 100) >> prv->load_precision_shift);
