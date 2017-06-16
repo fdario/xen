@@ -537,36 +537,71 @@ void smt_idle_mask_clear(unsigned int cpu, cpumask_t *mask)
 }
 
 /*
- * When a hard affinity change occurs, we may not be able to check some
- * (any!) of the other runqueues, when looking for the best new processor
- * for svc (as trylock-s in csched2_cpu_pick() can fail). If that happens, we
- * pick, in order of decreasing preference:
- *  - svc's current pcpu;
- *  - another pcpu from svc's current runq;
- *  - any cpu.
+ * In csched2_cpu_pick(), it may not be possible to actually look at remote
+ * runqueues (the trylock-s on their spinlocks can fail!). If that happens,
+ * we pick, in order of decreasing preference:
+ *  1) svc's current pcpu, if it is part of svc's soft affinity;
+ *  2) a pcpu in svc's current runqueue that is also in svc's soft affinity;
+ *  3) just one valid pcpu from svc's soft affinity;
+ *  4) svc's current pcpu, if it is part of svc's hard affinity;
+ *  5) a pcpu in svc's current runqueue that is also in svc's hard affinity;
+ *  6) just one valid pcpu from svc's hard affinity
+ *
+ * Of course, 1, 2 and 3 makes sense only if svc has a soft affinity. Also
+ * note that at least 6 is guaranteed to _always_ return at least one pcpu.
  */
 static int get_fallback_cpu(struct csched2_vcpu *svc)
 {
     struct vcpu *v = svc->vcpu;
-    int cpu = v->processor;
+    unsigned int bs;
 
-    cpumask_and(cpumask_scratch_cpu(cpu), v->cpu_hard_affinity,
-                cpupool_domain_cpumask(v->domain));
-
-    if ( likely(cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu))) )
-        return cpu;
-
-    if ( likely(cpumask_intersects(cpumask_scratch_cpu(cpu),
-                                   &svc->rqd->active)) )
+    for_each_affinity_balance_step( bs )
     {
-        cpumask_and(cpumask_scratch_cpu(cpu), &svc->rqd->active,
-                    cpumask_scratch_cpu(cpu));
-        return cpumask_first(cpumask_scratch_cpu(cpu));
+        int cpu = v->processor;
+
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(v, v->cpu_hard_affinity) )
+            continue;
+
+        affinity_balance_cpumask(v, bs, cpumask_scratch_cpu(cpu));
+        cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
+                    cpupool_domain_cpumask(v->domain));
+
+        /*
+         * This is cases 1 or 4 (depending on bs): if v->processor is (still)
+         * in our affinity, go for it, for cache betterness.
+         */
+        if ( likely(cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu))) )
+            return cpu;
+
+        /*
+         * This is cases 2 or 5 (depending on bs): v->processor isn't there
+         * any longer, check if we at least can stay in our current runq.
+         */
+        if ( likely(cpumask_intersects(cpumask_scratch_cpu(cpu),
+                                       &svc->rqd->active)) )
+        {
+            cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
+                        &svc->rqd->active);
+            return cpumask_first(cpumask_scratch_cpu(cpu));
+        }
+
+        /*
+         * This is cases 3 or 6 (depending on bs): last stand, just one valid
+         * pcpu from our soft affinity, if we have one and if there's any. In
+         * fact, if we are doing soft-affinity, it is possible that we fail,
+         * which means we stay in the loop and look for hard affinity. OTOH,
+         * if we are at the hard-affinity balancing step, it's guaranteed that
+         * there is at least one valid cpu, and therefore we are sure that we
+         * return it, and never really exit the loop.
+         */
+        ASSERT(!cpumask_empty(cpumask_scratch_cpu(cpu)) ||
+               bs == BALANCE_SOFT_AFFINITY);
+        cpu = cpumask_first(cpumask_scratch_cpu(cpu));
+        if ( likely(cpu < nr_cpu_ids) )
+            return cpu;
     }
-
-    ASSERT(!cpumask_empty(cpumask_scratch_cpu(cpu)));
-
-    return cpumask_first(cpumask_scratch_cpu(cpu));
+    BUG_ON(1);
 }
 
 /*
