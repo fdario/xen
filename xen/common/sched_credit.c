@@ -429,6 +429,24 @@ static inline void __runq_tickle(struct csched_vcpu *new)
     idlers_empty = cpumask_empty(&idle_mask);
 
     /*
+     * Exclusive pinning is when a vcpu has hard-affinity with only one
+     * cpu, and there is no other vcpu that has hard-affinity with that
+     * same cpu. This is infrequent, but if it happens, is for achieving
+     * the most possible determinism, and least possible overhead for
+     * the vcpus in question.
+     *
+     * Try to identify the vast majority of these situations, and deal
+     * with them quickly.
+     */
+    if ( unlikely(cpumask_cycle(cpu, new->vcpu->cpu_hard_affinity) == cpu &&
+                  cpumask_test_cpu(cpu, &idle_mask)) )
+    {
+        SCHED_STAT_CRANK(tickled_idle_cpu_excl);
+        __cpumask_set_cpu(cpu, &mask);
+        goto tickle;
+    }
+
+    /*
      * If the pcpu is idle, or there are no idlers and the new
      * vcpu is a higher priority than the old vcpu, run it here.
      *
@@ -524,6 +542,7 @@ static inline void __runq_tickle(struct csched_vcpu *new)
         }
     }
 
+ tickle:
     if ( !cpumask_empty(&mask) )
     {
         if ( unlikely(tb_init_done) )

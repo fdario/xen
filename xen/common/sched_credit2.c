@@ -1186,7 +1186,26 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                 cpupool_domain_cpumask(new->vcpu->domain));
 
     /*
-     * First of all, consider idle cpus, checking if we can just
+     * Exclusive pinning is when a vcpu has hard-affinity with only one
+     * cpu, and there is no other vcpu that has hard-affinity with that
+     * same cpu. This is infrequent, but if it happens, is for achieving
+     * the most possible determinism, and least possible overhead for
+     * the vcpus in question.
+     *
+     * Try to identify the vast majority of these situations, and deal
+     * with them quickly.
+     */
+    if ( unlikely(cpumask_cycle(cpu, cpumask_scratch_cpu(cpu)) == cpu &&
+                  cpumask_test_cpu(cpu, &rqd->idle) &&
+                  !cpumask_test_cpu(cpu, &rqd->tickled)) )
+    {
+        SCHED_STAT_CRANK(tickled_idle_cpu_excl);
+        ipid = cpu;
+        goto tickle;
+    }
+
+    /*
+     * Afterwards, let's consider idle cpus, checking if we can just
      * re-use the pcpu where we were running before.
      *
      * If there are cores where all the siblings are idle, consider
