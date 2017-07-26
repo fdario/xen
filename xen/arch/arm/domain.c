@@ -43,8 +43,9 @@ static void do_idle(void)
 {
     unsigned int cpu = smp_processor_id();
 
+    rcu_idle_timer_start();
     sched_tick_suspend();
-    /* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
+    /* Timer related operations can raise TIMER_SOFTIRQ. Process it now. */
     process_pending_softirqs();
 
     local_irq_disable();
@@ -58,6 +59,7 @@ static void do_idle(void)
     local_irq_enable();
 
     sched_tick_resume();
+    rcu_idle_timer_stop();
 }
 
 void idle_loop(void)

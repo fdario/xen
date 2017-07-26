@@ -84,7 +84,13 @@ struct rcu_data {
     int cpu;
     struct rcu_head barrier;
     long            last_rs_qlen;     /* qlen during the last resched */
+
+    /* 3) idle CPUs handling */
+    struct timer idle_timer;
+    bool idle_timer_active;
 };
+
+#define RCU_IDLE_TIMER_PERIOD MILLISECS(10)
 
 static DEFINE_PER_CPU(struct rcu_data, rcu_data);
 
@@ -402,7 +408,48 @@ int rcu_needs_cpu(int cpu)
 {
     struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
 
-    return (!!rdp->curlist || rcu_pending(cpu));
+    return (!!rdp->curlist || rcu_pending(cpu)) && !rdp->idle_timer_active;
+}
+
+/*
+ * Timer for making sure the CPU where a callback is queued does
+ * periodically poke rcu_pedning(), so that it will invoke the callback
+ * not too late after the end of the grace period.
+ */
+void rcu_idle_timer_start()
+{
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    if (likely(!rdp->curlist))
+        return;
+
+    set_timer(&rdp->idle_timer, NOW() + RCU_IDLE_TIMER_PERIOD);
+    rdp->idle_timer_active = true;
+}
+
+void rcu_idle_timer_stop()
+{
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    if (likely(!rdp->idle_timer_active))
+        return;
+
+    rdp->idle_timer_active = false;
+    stop_timer(&rdp->idle_timer);
+}
+
+static void rcu_idle_timer_handler(void* data)
+{
+    /*
+     * Nothing, really... And in fact, we don't expect to ever get in here,
+     * as rcu_idle_timer_stop(), called while waking from idle, prevent that
+     * to happen by stopping the timer before the TIMER_SOFTIRQ handler has
+     * a chance to run.
+     *
+     * But that's fine, because all we want is the CPU that needs to execute
+     * the callback to be periodically woken up and check rcu_pending().
+     */
+    ASSERT_UNREACHABLE();
 }
 
 void rcu_check_callbacks(int cpu)
@@ -423,6 +470,8 @@ static void rcu_move_batch(struct rcu_data *this_rdp, struct rcu_head *list,
 static void rcu_offline_cpu(struct rcu_data *this_rdp,
                             struct rcu_ctrlblk *rcp, struct rcu_data *rdp)
 {
+    kill_timer(&rdp->idle_timer);
+
     /* If the cpu going offline owns the grace period we can block
      * indefinitely waiting for it, so flush it here.
      */
@@ -451,6 +500,7 @@ static void rcu_init_percpu_data(int cpu, struct rcu_ctrlblk *rcp,
     rdp->qs_pending = 0;
     rdp->cpu = cpu;
     rdp->blimit = blimit;
+    init_timer(&rdp->idle_timer, rcu_idle_timer_handler, (void*) rdp, cpu);
 }
 
 static int cpu_callback(

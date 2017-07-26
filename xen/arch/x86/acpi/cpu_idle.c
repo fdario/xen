@@ -576,10 +576,10 @@ static void acpi_processor_idle(void)
         return;
     }
 
+    rcu_idle_timer_start();
     cpufreq_dbs_timer_suspend();
-
     sched_tick_suspend();
-    /* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
+    /* Timer related operations can raise TIMER_SOFTIRQ. Process it now. */
     process_pending_softirqs();
 
     /*
@@ -593,6 +593,7 @@ static void acpi_processor_idle(void)
         local_irq_enable();
         sched_tick_resume();
         cpufreq_dbs_timer_resume();
+        rcu_idle_timer_stop();
         return;
     }
 
@@ -726,6 +727,7 @@ static void acpi_processor_idle(void)
 
     sched_tick_resume();
     cpufreq_dbs_timer_resume();
+    rcu_idle_timer_stop();
 
     if ( cpuidle_current_governor->reflect )
         cpuidle_current_governor->reflect(power);
