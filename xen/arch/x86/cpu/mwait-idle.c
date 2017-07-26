@@ -741,9 +741,8 @@ static void mwait_idle(void)
 	}
 
 	cpufreq_dbs_timer_suspend();
-
 	sched_tick_suspend();
-	/* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
+	/* Timer related operations can raise TIMER_SOFTIRQ. Process it now. */
 	process_pending_softirqs();
 
 	/* Interrupts must be disabled for C2 and higher transitions. */
