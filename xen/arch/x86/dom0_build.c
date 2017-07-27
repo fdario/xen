@@ -125,8 +125,8 @@ struct vcpu *__init dom0_setup_vcpu(struct domain *d,
     if ( v )
     {
         if ( !d->is_pinned && !dom0_affinity_relaxed )
-            cpumask_copy(v->cpu_hard_affinity, &dom0_cpus);
-        cpumask_copy(v->cpu_soft_affinity, &dom0_cpus);
+            sched_set_affinity(v, &dom0_cpus, NULL);
+        sched_set_affinity(v, NULL, &dom0_cpus);
     }
 
     return v;

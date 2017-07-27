@@ -256,6 +256,9 @@ static void sched_spin_unlock_double(spinlock_t *lock1, spinlock_t *lock2,
 int sched_init_vcpu(struct vcpu *v, unsigned int processor) 
 {
     struct domain *d = v->domain;
+    cpumask_t allcpus;
+
+    cpumask_setall(&allcpus);
 
     /*
      * Initialize processor and affinity settings. The idler, and potentially
@@ -263,11 +266,9 @@ int sched_init_vcpu(struct vcpu *v, unsigned int processor)
      */
     v->processor = processor;
     if ( is_idle_domain(d) || d->is_pinned )
-        cpumask_copy(v->cpu_hard_affinity, cpumask_of(processor));
+        sched_set_affinity(v, cpumask_of(processor), &allcpus);
     else
-        cpumask_setall(v->cpu_hard_affinity);
-
-    cpumask_setall(v->cpu_soft_affinity);
+        sched_set_affinity(v, &allcpus, &allcpus);
 
     /* Initialise the per-vcpu timers. */
     init_timer(&v->periodic_timer, vcpu_periodic_timer_fn,
@@ -359,6 +360,7 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
     for_each_vcpu ( d, v )
     {
         spinlock_t *lock;
+        cpumask_t allcpus;
 
         vcpudata = v->sched_priv;
 
@@ -366,10 +368,12 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
         migrate_timer(&v->singleshot_timer, new_p);
         migrate_timer(&v->poll_timer, new_p);
 
-        cpumask_setall(v->cpu_hard_affinity);
-        cpumask_setall(v->cpu_soft_affinity);
+        cpumask_setall(&allcpus);
 
         lock = vcpu_schedule_lock_irq(v);
+
+        sched_set_affinity(v, &allcpus, &allcpus);
+
         v->processor = new_p;
         /*
          * With v->processor modified we must not
@@ -680,7 +684,7 @@ void restore_vcpu_affinity(struct domain *d)
 
         if ( v->affinity_broken )
         {
-            cpumask_copy(v->cpu_hard_affinity, v->cpu_hard_affinity_saved);
+            sched_set_affinity(v, v->cpu_hard_affinity_saved, NULL);
             v->affinity_broken = 0;
 
         }
@@ -744,6 +748,8 @@ int cpu_disable_scheduler(unsigned int cpu)
             if ( cpumask_empty(&online_affinity) &&
                  cpumask_test_cpu(cpu, v->cpu_hard_affinity) )
             {
+                cpumask_t allcpus;
+
                 if ( v->affinity_broken )
                 {
                     /* The vcpu is temporarily pinned, can't move it. */
@@ -761,7 +767,8 @@ int cpu_disable_scheduler(unsigned int cpu)
                 else
                     printk(XENLOG_DEBUG "Breaking affinity for %pv\n", v);
 
-                cpumask_setall(v->cpu_hard_affinity);
+                cpumask_setall(&allcpus);
+                sched_set_affinity(v, &allcpus, NULL);
             }
 
             if ( v->processor != cpu )
@@ -831,8 +838,26 @@ int cpu_disable_scheduler(unsigned int cpu)
     return ret;
 }
 
+/*
+ * In general, this must be called with the scheduler lock held, because the
+ * adjust_affinity hook may want to modify the vCPU state. However, when the
+ * vCPU is being initialized (either for dom0 or domU) there is no risk of
+ * races, and it's fine to not take the look (we're talking about
+ * dom0_setup_vcpu() an sched_init_vcpu()).
+ */
+void sched_set_affinity(
+    struct vcpu *v, const cpumask_t *hard, const cpumask_t *soft)
+{
+    SCHED_OP(dom_scheduler(v->domain), adjust_affinity, v, hard, soft);
+
+    if ( hard )
+        cpumask_copy(v->cpu_hard_affinity, hard);
+    if ( soft )
+        cpumask_copy(v->cpu_hard_affinity, soft);
+}
+
 static int vcpu_set_affinity(
-    struct vcpu *v, const cpumask_t *affinity, cpumask_t *which)
+    struct vcpu *v, const cpumask_t *affinity, const cpumask_t *which)
 {
     spinlock_t *lock;
     int ret = 0;
@@ -843,12 +868,19 @@ static int vcpu_set_affinity(
         ret = -EBUSY;
     else
     {
-        cpumask_copy(which, affinity);
-
         /*
-         * Always ask the scheduler to re-evaluate placement
-         * when changing the affinity.
+         * Tell the scheduler we changes something about affinity,
+         * and ask to re-evaluate vcpu placement.
          */
+        if ( which == v->cpu_hard_affinity )
+        {
+            sched_set_affinity(v, affinity, NULL);
+        }
+        else
+        {
+            ASSERT(which == v->cpu_soft_affinity);
+            sched_set_affinity(v, NULL, affinity);
+        }
         set_bit(_VPF_migrating, &v->pause_flags);
     }
 
@@ -1086,7 +1118,7 @@ int vcpu_pin_override(struct vcpu *v, int cpu)
     {
         if ( v->affinity_broken )
         {
-            cpumask_copy(v->cpu_hard_affinity, v->cpu_hard_affinity_saved);
+            sched_set_affinity(v, v->cpu_hard_affinity_saved, NULL);
             v->affinity_broken = 0;
             set_bit(_VPF_migrating, &v->pause_flags);
             ret = 0;
@@ -1100,7 +1132,7 @@ int vcpu_pin_override(struct vcpu *v, int cpu)
         {
             cpumask_copy(v->cpu_hard_affinity_saved, v->cpu_hard_affinity);
             v->affinity_broken = 1;
-            cpumask_copy(v->cpu_hard_affinity, cpumask_of(cpu));
+            sched_set_affinity(v, cpumask_of(cpu), NULL);
             set_bit(_VPF_migrating, &v->pause_flags);
             ret = 0;
         }
