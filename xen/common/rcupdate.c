@@ -110,10 +110,17 @@ struct rcu_data {
  * About how far in the future the timer should be programmed each time,
  * it's hard to tell (guess!!). Since this mimics Linux's periodic timer
  * tick, take values used there as an indication. In Linux 2.6.21, tick
- * period can be 10ms, 4ms, 3.33ms or 1ms. Let's use 10ms, to enable
- * at least some power saving on the CPU that is going idle.
+ * period can be 10ms, 4ms, 3.33ms or 1ms.
+ *
+ * That being said, we can assume that, the more CPUs are still active in
+ * the current grace period, the longer it will take for it to come to its
+ * end. We wait 10ms for each active CPU, as minimizing the wakeups enables
+ * more effective power saving, on the CPU that has gone idle. But we also
+ * never wait more than 100ms, to avoid delaying recognising the end of a
+ * grace period (and the invocation of the callbacks) by too much.
  */
-#define RCU_IDLE_TIMER_PERIOD MILLISECS(10)
+#define RCU_IDLE_TIMER_CPU_DELAY  MILLISECS(10)
+#define RCU_IDLE_TIMER_PERIOD_MAX MILLISECS(100)
 
 static DEFINE_PER_CPU(struct rcu_data, rcu_data);
 
@@ -444,6 +451,7 @@ int rcu_needs_cpu(int cpu)
 void rcu_idle_timer_start()
 {
     struct rcu_data *rdp = &this_cpu(rcu_data);
+    s_time_t next;
 
     /*
      * Note that we don't check rcu_pending() here. In fact, we don't want
@@ -453,7 +461,9 @@ void rcu_idle_timer_start()
     if (likely(!rdp->curlist))
         return;
 
-    set_timer(&rdp->idle_timer, NOW() + RCU_IDLE_TIMER_PERIOD);
+    next = min_t(s_time_t, RCU_IDLE_TIMER_PERIOD_MAX,
+                 cpumask_weight(&rcu_ctrlblk.cpumask) * RCU_IDLE_TIMER_CPU_DELAY);
+    set_timer(&rdp->idle_timer, NOW() + next);
     rdp->idle_timer_active = true;
 }
 
