@@ -210,6 +210,8 @@ struct vcpu
     bool             hcall_compat;
 #endif
 
+    /* Does soft affinity actually play a role (given hard affinity)? */
+    bool             soft_aff_effective;
 
     /*
      * > 0: a single port is being polled;

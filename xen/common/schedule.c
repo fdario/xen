@@ -854,6 +854,11 @@ void sched_set_affinity(
         cpumask_copy(v->cpu_hard_affinity, hard);
     if ( soft )
         cpumask_copy(v->cpu_hard_affinity, soft);
+
+    v->soft_aff_effective = !cpumask_subset(v->cpu_hard_affinity,
+                                            v->cpu_soft_affinity) &&
+                            cpumask_intersects(v->cpu_soft_affinity,
+                                               v->cpu_hard_affinity);
 }
 
 static int vcpu_set_affinity(
