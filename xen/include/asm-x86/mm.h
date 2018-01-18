@@ -582,6 +582,9 @@ int create_perdomain_mapping(struct domain *, unsigned long va,
                              struct page_info **);
 void destroy_perdomain_mapping(struct domain *, unsigned long va,
                                unsigned int nr);
+int modflags_perdomain_mapping(struct domain *d, unsigned long va,
+                               unsigned int flags_add, unsigned int flags_rm);
+int addmfn_to_perdomain_mapping(struct domain *d, unsigned long va, mfn_t mfn);
 void free_perdomain_mappings(struct domain *);
 
 extern int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm);

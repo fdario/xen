@@ -1568,7 +1568,7 @@ void init_xen_l4_slots(l4_pgentry_t *l4t, mfn_t l4mfn,
 
     /* Slot 260: Per-domain mappings (if applicable). */
     l4t[l4_table_offset(PERDOMAIN_VIRT_START)] =
-        d ? l4e_from_page(d->arch.perdomain_l3_pg, __PAGE_HYPERVISOR_RW)
+        d ? l4e_from_page(d->arch.perdomain_l3_pg, __PAGE_HYPERVISOR)
           : l4e_empty();
 
     /* Slot 261-: text/data/bss, RW M2P, vmap, frametable, directmap. */
@@ -5265,7 +5265,7 @@ int create_perdomain_mapping(struct domain *d, unsigned long va,
         }
         l2tab = __map_domain_page(pg);
         clear_page(l2tab);
-        l3tab[l3_table_offset(va)] = l3e_from_page(pg, __PAGE_HYPERVISOR_RW);
+        l3tab[l3_table_offset(va)] = l3e_from_page(pg, __PAGE_HYPERVISOR);
     }
     else
         l2tab = map_l2t_from_l3e(l3tab[l3_table_offset(va)]);
@@ -5307,7 +5307,7 @@ int create_perdomain_mapping(struct domain *d, unsigned long va,
                 l1tab = __map_domain_page(pg);
             }
             clear_page(l1tab);
-            *pl2e = l2e_from_page(pg, __PAGE_HYPERVISOR_RW);
+            *pl2e = l2e_from_page(pg, __PAGE_HYPERVISOR);
         }
         else if ( !l1tab )
             l1tab = map_l1t_from_l2e(*pl2e);
@@ -5395,6 +5395,92 @@ void destroy_perdomain_mapping(struct domain *d, unsigned long va,
     }
 
     unmap_domain_page(l3tab);
+}
+
+int modflags_perdomain_mapping(struct domain *d, unsigned long va,
+                               unsigned int flags_add, unsigned int flags_rm)
+{
+    const l3_pgentry_t *l3tab, *pl3e;
+    int rc = -ENOENT;
+
+    ASSERT(va >= PERDOMAIN_VIRT_START &&
+           va < PERDOMAIN_VIRT_SLOT(PERDOMAIN_SLOTS));
+
+    if ( !d->arch.perdomain_l3_pg )
+        return -ENOENT;
+
+    l3tab = __map_domain_page(d->arch.perdomain_l3_pg);
+    pl3e = l3tab + l3_table_offset(va);
+
+    if ( l3e_get_flags(*pl3e) & _PAGE_PRESENT )
+    {
+        const l2_pgentry_t *l2tab = map_l2t_from_l3e(*pl3e);
+        const l2_pgentry_t *pl2e = l2tab + l2_table_offset(va);
+
+        if ( l2e_get_flags(*pl2e) & _PAGE_PRESENT )
+        {
+            l1_pgentry_t *l1tab = map_l1t_from_l2e(*pl2e);
+            unsigned int off = l1_table_offset(va);
+
+            if ( (l1e_get_flags(l1tab[off]) & (_PAGE_PRESENT | _PAGE_AVAIL0)) ==
+                 (_PAGE_PRESENT | _PAGE_AVAIL0) )
+            {
+                rc = 0;
+                l1e_remove_flags(l1tab[off], flags_rm);
+                l1e_add_flags(l1tab[off], flags_add);
+            }
+
+            unmap_domain_page(l1tab);
+        }
+
+        unmap_domain_page(l2tab);
+    }
+
+    unmap_domain_page(l3tab);
+
+    return rc;
+}
+
+int addmfn_to_perdomain_mapping(struct domain *d, unsigned long va, mfn_t mfn)
+{
+    const l3_pgentry_t *l3tab, *pl3e;
+    int rc = -ENOENT;
+
+    ASSERT(va >= PERDOMAIN_VIRT_START &&
+           va < PERDOMAIN_VIRT_SLOT(PERDOMAIN_SLOTS));
+
+    if ( !d->arch.perdomain_l3_pg )
+        return -ENOENT;
+
+    l3tab = __map_domain_page(d->arch.perdomain_l3_pg);
+    pl3e = l3tab + l3_table_offset(va);
+
+    if ( l3e_get_flags(*pl3e) & _PAGE_PRESENT )
+    {
+        const l2_pgentry_t *l2tab = map_l2t_from_l3e(*pl3e);
+        const l2_pgentry_t *pl2e = l2tab + l2_table_offset(va);
+
+        if ( l2e_get_flags(*pl2e) & _PAGE_PRESENT )
+        {
+            l1_pgentry_t *l1tab = map_l1t_from_l2e(*pl2e);
+            unsigned int off = l1_table_offset(va);
+
+            rc = 0;
+            if ( (l1e_get_flags(l1tab[off]) & (_PAGE_PRESENT | _PAGE_AVAIL0)) ==
+                 (_PAGE_PRESENT | _PAGE_AVAIL0) )
+                free_domheap_page(l1e_get_page(l1tab[off]));
+
+            l1tab[off] = l1e_from_mfn(mfn, __PAGE_HYPERVISOR_RW);
+
+            unmap_domain_page(l1tab);
+        }
+
+        unmap_domain_page(l2tab);
+    }
+
+    unmap_domain_page(l3tab);
+
+    return rc;
 }
 
 void free_perdomain_mappings(struct domain *d)
