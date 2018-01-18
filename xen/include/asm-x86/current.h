@@ -12,11 +12,26 @@
 #include <asm/page.h>
 
 /*
- * Xen's cpu stacks are 8 pages (8-page aligned), arranged as:
+ * Xen's physical cpu stacks are 8 pages (8-page aligned), arranged as:
  *
  * 7 - Primary stack (with a struct cpu_info at the top)
  * 6 - Primary stack
  * 5 - Optionally not preset (MEMORY_GUARD)
+ * 4 - unused
+ * 3 - Syscall trampolines
+ * 2 - MCE IST stack
+ * 1 - NMI IST stack
+ * 0 - Double Fault IST stack
+ */
+
+/*
+ * The vcpu stacks used for XPTI are arranged similar to the physical cpu
+ * stacks with some modifications. The main difference are the primary stack
+ * size (only 1 page) and usage of the unused mappings for TSS and IDT.
+ *
+ * 7 - Primary stack (with a struct cpu_info at the top)
+ * 6 - unused
+ * 5 - TSS
  * 4 - unused
  * 3 - Syscall trampolines
  * 2 - MCE IST stack
@@ -37,17 +52,29 @@ struct vcpu;
 
 struct cpu_info {
     struct cpu_user_regs guest_cpu_user_regs;
-    unsigned int processor_id;
-    struct vcpu *current_vcpu;
-    unsigned long per_cpu_offset;
-    unsigned long cr4;
+    union {
+        /* per physical cpu mapping */
+        struct {
+            struct vcpu *current_vcpu;
+            unsigned long per_cpu_offset;
+            unsigned long cr4;
 
-    /* See asm-x86/spec_ctrl_asm.h for usage. */
-    unsigned int shadow_spec_ctrl;
-    bool         use_shadow_spec_ctrl;
-    uint8_t      bti_ist_info;
-
-    unsigned long __pad;
+            /* See asm-x86/spec_ctrl_asm.h for usage. */
+            unsigned int shadow_spec_ctrl;
+            bool         use_shadow_spec_ctrl;
+            uint8_t      bti_ist_info;
+            unsigned long p_pad;
+        };
+        /* per vcpu mapping (xpti) */
+        struct {
+            unsigned long v_pad[4];
+            unsigned long stack_bottom_cpu;
+        };
+    };
+    unsigned int processor_id;  /* per physical cpu mapping only */
+    unsigned int flags;
+#define ON_VCPUSTACK      0x00000001
+#define VCPUSTACK_ACTIVE  0x00000002
     /* get_stack_bottom() must be 16-byte aligned */
 };
 

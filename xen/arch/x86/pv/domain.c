@@ -120,6 +120,8 @@ void pv_vcpu_destroy(struct vcpu *v)
     pv_destroy_gdt_ldt_l1tab(v);
     xfree(v->arch.pv_vcpu.trap_ctxt);
     v->arch.pv_vcpu.trap_ctxt = NULL;
+
+    xpti_vcpu_destroy(v);
 }
 
 int pv_vcpu_initialise(struct vcpu *v)

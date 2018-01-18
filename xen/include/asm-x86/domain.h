@@ -505,6 +505,9 @@ struct pv_vcpu
     /* Deferred VA-based update state. */
     bool_t need_update_runstate_area;
     struct vcpu_time_info pending_system_time;
+
+    /* If XPTI is active: pointer to user regs on stack. */
+    struct cpu_user_regs *stack_regs;
 };
 
 typedef enum __packed {

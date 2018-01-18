@@ -66,6 +66,7 @@
 #endif
 
 #define STACK_ORDER 3
+#define STACK_PAGES (1 << STACK_ORDER)
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
 
 #define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
@@ -202,7 +203,7 @@ extern unsigned char boot_edid_info[128];
 /* Slot 260: per-domain mappings (including map cache). */
 #define PERDOMAIN_VIRT_START    (PML4_ADDR(260))
 #define PERDOMAIN_SLOT_MBYTES   (PML4_ENTRY_BYTES >> (20 + PAGETABLE_ORDER))
-#define PERDOMAIN_SLOTS         3
+#define PERDOMAIN_SLOTS         4
 #define PERDOMAIN_VIRT_SLOT(s)  (PERDOMAIN_VIRT_START + (s) * \
                                  (PERDOMAIN_SLOT_MBYTES << 20))
 /* Slot 261: machine-to-phys conversion table (256GB). */
@@ -309,6 +310,16 @@ extern unsigned long xen_phys_start;
 #define ARG_XLAT_VA_SHIFT        (2 + PAGE_SHIFT)
 #define ARG_XLAT_START(v)        \
     (ARG_XLAT_VIRT_START + ((v)->vcpu_id << ARG_XLAT_VA_SHIFT))
+
+/* Per-vcpu XPTI pages. The fourth per-domain-mapping sub-area. */
+#define XPTI_VIRT_START          PERDOMAIN_VIRT_SLOT(3)
+#define XPTI_VA_SHIFT            (PAGE_SHIFT + STACK_ORDER)
+#define XPTI_TRAMPOLINE_OFF      (IST_MAX << PAGE_SHIFT)
+#define XPTI_TSS_OFF             ((IST_MAX + 2) << PAGE_SHIFT)
+#define XPTI_START(v)            (XPTI_VIRT_START + \
+                                  ((v)->vcpu_id << XPTI_VA_SHIFT))
+#define XPTI_TRAMPOLINE(v)       (XPTI_START(v) + XPTI_TRAMPOLINE_OFF)
+#define XPTI_TSS(v)              (XPTI_START(v) + XPTI_TSS_OFF)
 
 #define NATIVE_VM_ASSIST_VALID   ((1UL << VMASST_TYPE_4gb_segments)        | \
                                   (1UL << VMASST_TYPE_4gb_segments_notify) | \

@@ -31,6 +31,7 @@ void pv_destroy_gdt(struct vcpu *v);
 bool pv_map_ldt_shadow_page(unsigned int off);
 bool pv_destroy_ldt(struct vcpu *v);
 
+void xpti_vcpu_destroy(struct vcpu *v);
 int xpti_domain_init(struct domain *d);
 void xpti_domain_destroy(struct domain *d);
 
@@ -65,6 +66,7 @@ static inline bool pv_map_ldt_shadow_page(unsigned int off) { return false; }
 static inline bool pv_destroy_ldt(struct vcpu *v)
 { ASSERT_UNREACHABLE(); return false; }
 
+static inline void xpti_vcpu_init(struct vcpu *v) { }
 static inline int xpti_domain_init(struct domain *d) { return 0; }
 static inline void xpti_domain_destroy(struct domain *d) { }
 
