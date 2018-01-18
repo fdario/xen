@@ -97,6 +97,12 @@
                           X86_EFLAGS_NT|X86_EFLAGS_DF|X86_EFLAGS_IF|    \
                           X86_EFLAGS_TF)
 
+#define IST_NONE 0UL
+#define IST_DF   1UL
+#define IST_NMI  2UL
+#define IST_MCE  3UL
+#define IST_MAX  3UL
+
 #ifndef __ASSEMBLY__
 
 struct domain;
@@ -399,12 +405,6 @@ struct __packed __cacheline_aligned tss_struct {
     /* Pads the TSS to be cacheline-aligned (total size is 0x80). */
     uint8_t __cacheline_filler[24];
 };
-
-#define IST_NONE 0UL
-#define IST_DF   1UL
-#define IST_NMI  2UL
-#define IST_MCE  3UL
-#define IST_MAX  3UL
 
 /* Set the interrupt stack table used by a particular interrupt
  * descriptor table entry. */

@@ -9,8 +9,10 @@
 
 #include <xen/percpu.h>
 #include <public/xen.h>
+#include <asm/config.h>
 #include <asm/page.h>
 
+#ifndef __ASSEMBLY__
 /*
  * Xen's physical cpu stacks are 8 pages (8-page aligned), arranged as:
  *
@@ -73,8 +75,10 @@ struct cpu_info {
     };
     unsigned int processor_id;  /* per physical cpu mapping only */
     unsigned int flags;
+#endif /* !__ASSEMBLY__ */
 #define ON_VCPUSTACK      0x00000001
 #define VCPUSTACK_ACTIVE  0x00000002
+#ifndef __ASSEMBLY__
     /* get_stack_bottom() must be 16-byte aligned */
 };
 
@@ -99,9 +103,16 @@ static inline struct cpu_info *get_cpu_info(void)
 #define set_processor_id(id)  do {                                      \
     struct cpu_info *ci__ = get_cpu_info();                             \
     ci__->per_cpu_offset = __per_cpu_offset[ci__->processor_id = (id)]; \
+    ci__->flags = 0;                                                    \
 } while (0)
 
-#define guest_cpu_user_regs() (&get_cpu_info()->guest_cpu_user_regs)
+#define guest_cpu_user_regs() ({                                        \
+    struct cpu_info *info = get_cpu_info();                             \
+    if ( info->flags & VCPUSTACK_ACTIVE )                               \
+        info = (struct cpu_info *)(XPTI_START(info->current_vcpu) +     \
+                                   STACK_SIZE) - 1;                     \
+    &info->guest_cpu_user_regs;                                         \
+})
 
 /*
  * Get the bottom-of-stack, as stored in the per-CPU TSS. This actually points
@@ -143,5 +154,7 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
  * executing a lazy state switch.
  */
 DECLARE_PER_CPU(struct vcpu *, curr_vcpu);
+
+#endif /* !__ASSEMBLY__ */
 
 #endif /* __X86_CURRENT_H__ */

@@ -122,10 +122,10 @@ void wake_up_all(struct waitqueue_head *wq)
 
 static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
 {
-    struct cpu_info *cpu_info = get_cpu_info();
+    struct cpu_user_regs *user_regs = guest_cpu_user_regs();
     struct vcpu *curr = current;
     unsigned long dummy;
-    u32 entry_vector = cpu_info->guest_cpu_user_regs.entry_vector;
+    u32 entry_vector = user_regs->entry_vector;
 
     ASSERT(wqv->esp == 0);
 
@@ -160,7 +160,7 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
         "pop %%r11; pop %%r10; pop %%r9;  pop %%r8;"
         "pop %%rbp; pop %%rdx; pop %%rbx; pop %%rax"
         : "=&S" (wqv->esp), "=&c" (dummy), "=&D" (dummy)
-        : "i" (PAGE_SIZE), "0" (0), "1" (cpu_info), "2" (wqv->stack)
+        : "i" (PAGE_SIZE), "0" (0), "1" (user_regs), "2" (wqv->stack)
         : "memory" );
 
     if ( unlikely(wqv->esp == 0) )
@@ -169,7 +169,7 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
         domain_crash_synchronous();
     }
 
-    cpu_info->guest_cpu_user_regs.entry_vector = entry_vector;
+    user_regs->entry_vector = entry_vector;
 }
 
 static void __finish_wait(struct waitqueue_vcpu *wqv)

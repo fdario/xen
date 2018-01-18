@@ -201,7 +201,6 @@ ENTRY(compat_post_handle_exception)
 
 /* See lstar_enter for entry register state. */
 ENTRY(cstar_enter)
-        sti
         movq  8(%rsp),%rax /* Restore %rax. */
         movq  $FLAT_KERNEL_SS,8(%rsp)
         pushq %r11
@@ -211,6 +210,8 @@ ENTRY(cstar_enter)
         movl  $TRAP_syscall, 4(%rsp)
         SAVE_ALL
         movq  %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
+        sti
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */

@@ -7,6 +7,7 @@
 #include <asm/asm-offsets.h>
 #endif
 #include <asm/bug.h>
+#include <asm/current.h>
 #include <asm/page.h>
 #include <asm/processor.h>
 #include <asm/percpu.h>
@@ -135,6 +136,24 @@ void ret_from_intr(void);
 #define GET_CURRENT(reg)                          \
         GET_STACK_END(reg);                       \
         movq STACK_CPUINFO_FIELD(current_vcpu)(%r##reg), %r##reg
+
+#define SWITCH_FROM_VCPU_STACK                                           \
+        GET_STACK_END(ax);                                               \
+        testb $ON_VCPUSTACK, STACK_CPUINFO_FIELD(flags)(%rax);           \
+        jz    1f;                                                        \
+        movq  STACK_CPUINFO_FIELD(stack_bottom_cpu)(%rax), %rsp;         \
+1:
+
+#define SWITCH_FROM_VCPU_STACK_IST(ist)                                  \
+        GET_STACK_END(ax);                                               \
+        testb $ON_VCPUSTACK, STACK_CPUINFO_FIELD(flags)(%rax);           \
+        jz    1f;                                                        \
+        sub   $(STACK_SIZE - 1 - ist * PAGE_SIZE), %rax;                 \
+        mov   %rax, %rsp;                                                \
+1:
+
+#define SWITCH_TO_VCPU_STACK                                             \
+        mov   %r12, %rsp
 
 #ifndef NDEBUG
 #define ASSERT_NOT_IN_ATOMIC                                             \

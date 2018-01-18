@@ -45,6 +45,7 @@ restore_all_guest:
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_GUEST /* Req: a=spec_ctrl %rsp=cpuinfo, Clob: cd */
 
+        SWITCH_TO_VCPU_STACK
         RESTORE_ALL
         testw $TRAP_syscall,4(%rsp)
         jz    iret_exit_to_guest
@@ -106,7 +107,6 @@ restore_all_xen:
  * %ss must be saved into the space left by the trampoline.
  */
 ENTRY(lstar_enter)
-        sti
         movq  8(%rsp),%rax /* Restore %rax. */
         movq  $FLAT_KERNEL_SS,8(%rsp)
         pushq %r11
@@ -116,6 +116,8 @@ ENTRY(lstar_enter)
         movl  $TRAP_syscall, 4(%rsp)
         SAVE_ALL
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
+        sti
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
@@ -201,7 +203,6 @@ process_trap:
         jmp  test_all_events
 
 ENTRY(sysenter_entry)
-        sti
         pushq $FLAT_USER_SS
         pushq $0
         pushfq
@@ -213,6 +214,8 @@ GLOBAL(sysenter_eflags_saved)
         movl  $TRAP_syscall, 4(%rsp)
         SAVE_ALL
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
+        sti
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
@@ -253,6 +256,7 @@ ENTRY(int80_direct_trap)
         movl  $0x80, 4(%rsp)
         SAVE_ALL
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
@@ -421,6 +425,7 @@ ENTRY(dom_crash_sync_extable)
 ENTRY(common_interrupt)
         SAVE_ALL CLAC
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
 
         GET_STACK_END(14)
 
@@ -448,6 +453,7 @@ ENTRY(page_fault)
 GLOBAL(handle_exception)
         SAVE_ALL CLAC
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK
 
         GET_STACK_END(14)
 
@@ -630,6 +636,7 @@ ENTRY(double_fault)
         /* Set AC to reduce chance of further SMAP faults */
         SAVE_ALL STAC
         movq  %rsp, %r12
+        SWITCH_FROM_VCPU_STACK_IST(IST_DF)
 
         GET_STACK_END(14)
 
@@ -652,10 +659,11 @@ ENTRY(early_page_fault)
 ENTRY(nmi)
         pushq $0
         movl  $TRAP_nmi,4(%rsp)
-handle_ist_exception:
         SAVE_ALL CLAC
         mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK_IST(IST_NMI)
 
+handle_ist_exception:
         GET_STACK_END(14)
 
         SPEC_CTRL_ENTRY_FROM_INTR_IST /* Req: %r12=regs, %r14=end, Clob: acd */
@@ -702,6 +710,9 @@ handle_ist_exception:
 ENTRY(machine_check)
         pushq $0
         movl  $TRAP_machine_check,4(%rsp)
+        SAVE_ALL CLAC
+        mov   %rsp, %r12
+        SWITCH_FROM_VCPU_STACK_IST(IST_MCE)
         jmp   handle_ist_exception
 
 /* Enable NMIs.  No special register assumptions. Only %rax is not preserved. */
