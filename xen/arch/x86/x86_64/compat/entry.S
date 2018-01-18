@@ -214,17 +214,7 @@ ENTRY(cstar_enter)
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        neg   %rcx
-        jz    .Lcstar_cr3_okay
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-        neg   %rcx
-        write_cr3 rcx, rdi, rsi
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lcstar_cr3_okay:
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        GET_CURRENT(bx)
         movq  VCPU_domain(%rbx),%rcx
         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
         je    switch_to_kernel

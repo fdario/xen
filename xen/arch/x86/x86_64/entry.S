@@ -40,35 +40,7 @@ restore_all_guest:
 
         /* Stash guest SPEC_CTRL value while we can read struct vcpu. */
         mov VCPU_arch_msr(%rbx), %rdx
-        mov VCPUMSR_spec_ctrl_raw(%rdx), %r15d
-
-        /* Copy guest mappings and switch to per-CPU root page table. */
-        mov   %cr3, %r9
-        GET_STACK_END(dx)
-        mov   STACK_CPUINFO_FIELD(pv_cr3)(%rdx), %rdi
-        movabs $PADDR_MASK & PAGE_MASK, %rsi
-        movabs $DIRECTMAP_VIRT_START, %rcx
-        mov   %rdi, %rax
-        and   %rsi, %rdi
-        and   %r9, %rsi
-        add   %rcx, %rdi
-        add   %rcx, %rsi
-        mov   $ROOT_PAGETABLE_FIRST_XEN_SLOT, %ecx
-        mov   root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rsi), %r8
-        mov   %r8, root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rdi)
-        rep movsq
-        mov   $ROOT_PAGETABLE_ENTRIES - \
-               ROOT_PAGETABLE_LAST_XEN_SLOT - 1, %ecx
-        sub   $(ROOT_PAGETABLE_FIRST_XEN_SLOT - \
-                ROOT_PAGETABLE_LAST_XEN_SLOT - 1) * 8, %rsi
-        sub   $(ROOT_PAGETABLE_FIRST_XEN_SLOT - \
-                ROOT_PAGETABLE_LAST_XEN_SLOT - 1) * 8, %rdi
-        rep movsq
-        mov   %r9, STACK_CPUINFO_FIELD(xen_cr3)(%rdx)
-        write_cr3 rax, rdi, rsi
-
-        /* Restore stashed SPEC_CTRL value. */
-        mov   %r15d, %eax
+        mov VCPUMSR_spec_ctrl_raw(%rdx), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_GUEST /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
@@ -107,22 +79,7 @@ iret_exit_to_guest:
         ALIGN
 /* No special register assumptions. */
 restore_all_xen:
-        /*
-         * Check whether we need to switch to the per-CPU page tables, in
-         * case we return to late PV exit code (from an NMI or #MC).
-         */
         GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rdx
-        mov   STACK_CPUINFO_FIELD(pv_cr3)(%rbx), %rax
-        test  %rdx, %rdx
-        /*
-         * Ideally the condition would be "nsz", but such doesn't exist,
-         * so "g" will have to do.
-         */
-UNLIKELY_START(g, exit_cr3)
-        write_cr3 rax, rdi, rsi
-UNLIKELY_END(exit_cr3)
-
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_XEN_IST /* Req: %rbx=end, Clob: acd */
 
@@ -159,17 +116,7 @@ ENTRY(lstar_enter)
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        neg   %rcx
-        jz    .Llstar_cr3_okay
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-        neg   %rcx
-        write_cr3 rcx, rdi, rsi
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Llstar_cr3_okay:
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        GET_CURRENT(bx)
         testb $TF_kernel_mode,VCPU_thread_flags(%rbx)
         jz    switch_to_kernel
 
@@ -265,17 +212,7 @@ GLOBAL(sysenter_eflags_saved)
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        neg   %rcx
-        jz    .Lsyse_cr3_okay
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-        neg   %rcx
-        write_cr3 rcx, rdi, rsi
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lsyse_cr3_okay:
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        GET_CURRENT(bx)
         cmpb  $0,VCPU_sysenter_disables_events(%rbx)
         movq  VCPU_sysenter_addr(%rbx),%rax
         setne %cl
@@ -314,23 +251,13 @@ ENTRY(int80_direct_trap)
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        neg   %rcx
-        jz    .Lint80_cr3_okay
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-        neg   %rcx
-        write_cr3 rcx, rdi, rsi
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lint80_cr3_okay:
-
         cmpb  $0,untrusted_msi(%rip)
 UNLIKELY_START(ne, msi_check)
         movl  $0x80,%edi
         call  check_for_unexpected_msi
 UNLIKELY_END(msi_check)
 
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        GET_CURRENT(bx)
 
         /* Check that the callback is non-null. */
         leaq  VCPU_int80_bounce(%rbx),%rdx
@@ -493,25 +420,9 @@ ENTRY(common_interrupt)
         SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   %rcx, %r15
-        neg   %rcx
-        jz    .Lintr_cr3_okay
-        jns   .Lintr_cr3_load
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        neg   %rcx
-.Lintr_cr3_load:
-        write_cr3 rcx, rdi, rsi
-        xor   %ecx, %ecx
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        testb $3, UREGS_cs(%rsp)
-        cmovnz %rcx, %r15
-.Lintr_cr3_okay:
-
         CR4_PV32_RESTORE
         movq %rsp,%rdi
         callq do_IRQ
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
         jmp ret_from_intr
 
 /* No special register assumptions. */
@@ -534,21 +445,6 @@ GLOBAL(handle_exception)
 
         SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   %rcx, %r15
-        neg   %rcx
-        jz    .Lxcpt_cr3_okay
-        jns   .Lxcpt_cr3_load
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        neg   %rcx
-.Lxcpt_cr3_load:
-        write_cr3 rcx, rdi, rsi
-        xor   %ecx, %ecx
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        testb $3, UREGS_cs(%rsp)
-        cmovnz %rcx, %r15
-.Lxcpt_cr3_okay:
 
 handle_exception_saved:
         GET_CURRENT(bx)
@@ -615,7 +511,6 @@ handle_exception_saved:
         PERFC_INCR(exceptions, %rax, %rbx)
         mov   (%rdx, %rax, 8), %rdx
         INDIRECT_CALL %rdx
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
         testb $3,UREGS_cs(%rsp)
         jz    restore_all_xen
         leaq  VCPU_trap_bounce(%rbx),%rdx
@@ -648,7 +543,6 @@ exception_with_ints_disabled:
         rep;  movsq                     # make room for ec/ev
 1:      movq  UREGS_error_code(%rsp),%rax # ec/ev
         movq  %rax,UREGS_kernel_sizeof(%rsp)
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
         jmp   restore_all_xen           # return to fixup code
 
 /* No special register assumptions. */
@@ -733,15 +627,6 @@ ENTRY(double_fault)
         SPEC_CTRL_ENTRY_FROM_INTR_IST /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rbx
-        test  %rbx, %rbx
-        jz    .Ldblf_cr3_okay
-        jns   .Ldblf_cr3_load
-        neg   %rbx
-.Ldblf_cr3_load:
-        write_cr3 rbx, rdi, rsi
-.Ldblf_cr3_okay:
-
         movq  %rsp,%rdi
         call  do_double_fault
         BUG   /* do_double_fault() shouldn't return. */
@@ -766,26 +651,10 @@ handle_ist_exception:
         SPEC_CTRL_ENTRY_FROM_INTR_IST /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   %rcx, %r15
-        neg   %rcx
-        jz    .List_cr3_okay
-        jns   .List_cr3_load
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        neg   %rcx
-.List_cr3_load:
-        write_cr3 rcx, rdi, rsi
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-.List_cr3_okay:
-
         CR4_PV32_RESTORE
         testb $3,UREGS_cs(%rsp)
         jz    1f
-        /*
-         * Interrupted guest context. Clear the restore value for xen_cr3
-         * and copy the context to stack bottom.
-         */
-        xor   %r15, %r15
+        /* Interrupted guest context. Copy the context to stack bottom. */
         GET_CPUINFO_FIELD(guest_cpu_user_regs,di)
         movq  %rsp,%rsi
         movl  $UREGS_kernel_sizeof/8,%ecx
@@ -796,7 +665,6 @@ handle_ist_exception:
         leaq  exception_table(%rip),%rdx
         mov   (%rdx, %rax, 8), %rdx
         INDIRECT_CALL %rdx
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
         cmpb  $TRAP_nmi,UREGS_entry_vector(%rsp)
         jne   ret_from_intr
 
