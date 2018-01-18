@@ -219,7 +219,8 @@ static void compat_show_guest_stack(struct vcpu *v,
                                     const struct cpu_user_regs *regs,
                                     int debug_stack_lines)
 {
-    unsigned int i, *stack, addr, mask = STACK_SIZE;
+    unsigned int i, *stack, addr;
+    unsigned long last_addr = -1L;
 
     stack = (unsigned int *)(unsigned long)regs->esp;
     printk("Guest stack trace from esp=%08lx:\n ", (unsigned long)stack);
@@ -248,13 +249,13 @@ static void compat_show_guest_stack(struct vcpu *v,
                 printk("Inaccessible guest memory.\n");
                 return;
             }
-            mask = PAGE_SIZE;
+            last_addr = round_pgup((unsigned long)stack);
         }
     }
 
     for ( i = 0; i < debug_stack_lines * 8; i++ )
     {
-        if ( (((long)stack - 1) ^ ((long)(stack + 1) - 1)) & mask )
+        if ( (unsigned long)stack >= last_addr )
             break;
         if ( __get_user(addr, stack) )
         {
@@ -269,11 +270,9 @@ static void compat_show_guest_stack(struct vcpu *v,
         printk(" %08x", addr);
         stack++;
     }
-    if ( mask == PAGE_SIZE )
-    {
-        BUILD_BUG_ON(PAGE_SIZE == STACK_SIZE);
+    if ( last_addr != -1L )
         unmap_domain_page(stack);
-    }
+
     if ( i == 0 )
         printk("Stack empty.");
     printk("\n");
@@ -282,8 +281,7 @@ static void compat_show_guest_stack(struct vcpu *v,
 static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
 {
     int i;
-    unsigned long *stack, addr;
-    unsigned long mask = STACK_SIZE;
+    unsigned long *stack, addr, last_addr = -1L;
 
     /* Avoid HVM as we don't know what the stack looks like. */
     if ( is_hvm_vcpu(v) )
@@ -318,13 +316,13 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
                 printk("Inaccessible guest memory.\n");
                 return;
             }
-            mask = PAGE_SIZE;
+            last_addr = round_pgup((unsigned long)stack);
         }
     }
 
     for ( i = 0; i < (debug_stack_lines*stack_words_per_line); i++ )
     {
-        if ( (((long)stack - 1) ^ ((long)(stack + 1) - 1)) & mask )
+        if ( (unsigned long)stack >= last_addr )
             break;
         if ( __get_user(addr, stack) )
         {
@@ -339,11 +337,9 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
         printk(" %p", _p(addr));
         stack++;
     }
-    if ( mask == PAGE_SIZE )
-    {
-        BUILD_BUG_ON(PAGE_SIZE == STACK_SIZE);
+    if ( last_addr != -1L )
         unmap_domain_page(stack);
-    }
+
     if ( i == 0 )
         printk("Stack empty.");
     printk("\n");
