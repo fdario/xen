@@ -231,6 +231,13 @@ static inline int local_irq_is_enabled(void)
 void trap_init(void);
 void init_idt_traps(void);
 void tss_init(struct tss_struct *tss, unsigned long stack_bottom);
+void write_stub_trampoline(unsigned char *stub, unsigned long stub_va,
+                           unsigned long stack_bottom,
+                           unsigned long target_va);
+#define STUB_TRAMPOLINE_SIZE_PERCPU   32
+#define STUB_TRAMPOLINE_SIZE_PERVCPU  64
+void lstar_enter(void);
+void cstar_enter(void);
 void load_system_tables(void);
 void percpu_traps_init(void);
 void subarch_percpu_traps_init(void);

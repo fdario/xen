@@ -260,10 +260,11 @@ void do_double_fault(struct cpu_user_regs *regs)
     panic("DOUBLE FAULT -- system shutdown");
 }
 
-static unsigned int write_stub_trampoline(
-    unsigned char *stub, unsigned long stub_va,
-    unsigned long stack_bottom, unsigned long target_va)
+void write_stub_trampoline(unsigned char *stub, unsigned long stub_va,
+                           unsigned long stack_bottom, unsigned long target_va)
 {
+    long target_diff;
+
     /* movabsq %rax, stack_bottom - 8 */
     stub[0] = 0x48;
     stub[1] = 0xa3;
@@ -282,24 +283,32 @@ static unsigned int write_stub_trampoline(
     /* pushq %rax */
     stub[23] = 0x50;
 
-    /* jmp target_va */
-    stub[24] = 0xe9;
-    *(int32_t *)&stub[25] = target_va - (stub_va + 29);
-
-    /* Round up to a multiple of 16 bytes. */
-    return 32;
+    target_diff = target_va - (stub_va + 29);
+    if ( target_diff >> 31 == target_diff >> 63 )
+    {
+        /* jmp target_va */
+        stub[24] = 0xe9;
+        *(int32_t *)&stub[25] = target_diff;
+    }
+    else
+    {
+        /* movabs target_va, %rax */
+        stub[24] = 0x48;
+        stub[25] = 0xb8;
+        *(uint64_t *)&stub[26] = target_va;
+        /* jmpq *%rax */
+        stub[34] = 0xff;
+        stub[35] = 0xe0;
+    }
 }
 
 DEFINE_PER_CPU(struct stubs, stubs);
-void lstar_enter(void);
-void cstar_enter(void);
 
 void subarch_percpu_traps_init(void)
 {
     unsigned long stack_bottom = get_stack_bottom();
     unsigned long stub_va = this_cpu(stubs.addr);
     unsigned char *stub_page;
-    unsigned int offset;
 
     /* IST_MAX IST pages + 1 syscall page + 1 guard page + primary stack. */
     BUILD_BUG_ON((IST_MAX + 2) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
@@ -312,10 +321,9 @@ void subarch_percpu_traps_init(void)
      * start of the stubs.
      */
     wrmsrl(MSR_LSTAR, stub_va);
-    offset = write_stub_trampoline(stub_page + (stub_va & ~PAGE_MASK),
-                                   stub_va, stack_bottom,
-                                   (unsigned long)lstar_enter);
-    stub_va += offset;
+    write_stub_trampoline(stub_page + (stub_va & ~PAGE_MASK), stub_va,
+                          stack_bottom, (unsigned long)lstar_enter);
+    stub_va += STUB_TRAMPOLINE_SIZE_PERCPU;
 
     if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ||
          boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR )
@@ -328,12 +336,11 @@ void subarch_percpu_traps_init(void)
 
     /* Trampoline for SYSCALL entry from compatibility mode. */
     wrmsrl(MSR_CSTAR, stub_va);
-    offset += write_stub_trampoline(stub_page + (stub_va & ~PAGE_MASK),
-                                    stub_va, stack_bottom,
-                                    (unsigned long)cstar_enter);
+    write_stub_trampoline(stub_page + (stub_va & ~PAGE_MASK), stub_va,
+                          stack_bottom, (unsigned long)cstar_enter);
 
     /* Don't consume more than half of the stub space here. */
-    ASSERT(offset <= STUB_BUF_SIZE / 2);
+    ASSERT(2 * STUB_TRAMPOLINE_SIZE_PERCPU <= STUB_BUF_SIZE / 2);
 
     unmap_domain_page(stub_page);
 
