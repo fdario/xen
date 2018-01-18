@@ -230,6 +230,7 @@ static inline int local_irq_is_enabled(void)
 
 void trap_init(void);
 void init_idt_traps(void);
+void tss_init(struct tss_struct *tss, unsigned long stack_bottom);
 void load_system_tables(void);
 void percpu_traps_init(void);
 void subarch_percpu_traps_init(void);

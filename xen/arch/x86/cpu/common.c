@@ -702,34 +702,9 @@ void __init early_cpu_init(void)
 	early_cpu_detect();
 }
 
-/*
- * Sets up system tables and descriptors.
- *
- * - Sets up TSS with stack pointers, including ISTs
- * - Inserts TSS selector into regular and compat GDTs
- * - Loads GDT, IDT, TR then null LDT
- * - Sets up IST references in the IDT
- */
-void load_system_tables(void)
+void tss_init(struct tss_struct *tss, unsigned long stack_bottom)
 {
-	unsigned int cpu = smp_processor_id();
-	unsigned long stack_bottom = get_stack_bottom(),
-		stack_top = stack_bottom & ~(STACK_SIZE - 1);
-
-	struct tss_struct *tss = &this_cpu(init_tss);
-	struct desc_struct *gdt =
-		this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY;
-	struct desc_struct *compat_gdt =
-		this_cpu(compat_gdt_table) - FIRST_RESERVED_GDT_ENTRY;
-
-	const struct desc_ptr gdtr = {
-		.base = (unsigned long)gdt,
-		.limit = LAST_RESERVED_GDT_BYTE,
-	};
-	const struct desc_ptr idtr = {
-		.base = (unsigned long)idt_tables[cpu],
-		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
-	};
+	unsigned long stack_top = stack_bottom & ~(STACK_SIZE - 1);
 
 	*tss = (struct tss_struct){
 		/* Main stack for interrupts/exceptions. */
@@ -754,6 +729,37 @@ void load_system_tables(void)
 
 		.bitmap = IOBMP_INVALID_OFFSET,
 	};
+}
+
+/*
+ * Sets up system tables and descriptors.
+ *
+ * - Sets up TSS with stack pointers, including ISTs
+ * - Inserts TSS selector into regular and compat GDTs
+ * - Loads GDT, IDT, TR then null LDT
+ * - Sets up IST references in the IDT
+ */
+void load_system_tables(void)
+{
+	unsigned int cpu = smp_processor_id();
+	unsigned long stack_bottom = get_stack_bottom();
+
+	struct tss_struct *tss = &this_cpu(init_tss);
+	struct desc_struct *gdt =
+		this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY;
+	struct desc_struct *compat_gdt =
+		this_cpu(compat_gdt_table) - FIRST_RESERVED_GDT_ENTRY;
+
+	const struct desc_ptr gdtr = {
+		.base = (unsigned long)gdt,
+		.limit = LAST_RESERVED_GDT_BYTE,
+	};
+	const struct desc_ptr idtr = {
+		.base = (unsigned long)idt_tables[cpu],
+		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
+	};
+
+	tss_init(tss, stack_bottom);
 
 	_set_tssldt_desc(
 		gdt + TSS_ENTRY,
