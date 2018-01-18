@@ -102,9 +102,11 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
     ({                                                                  \
         __asm__ __volatile__ (                                          \
             "mov %0,%%"__OP"sp;"                                        \
-            CHECK_FOR_LIVEPATCH_WORK                                      \
-             "jmp %c1"                                                  \
-            : : "r" (guest_cpu_user_regs()), "i" (__fn) : "memory" );   \
+            "mov %1,%%r12;"                                             \
+            CHECK_FOR_LIVEPATCH_WORK                                    \
+            "jmp %c2"                                                   \
+            : : "r" (get_cpu_info()), "r" (guest_cpu_user_regs()),      \
+                "i" (__fn) : "memory" );                                \
         unreachable();                                                  \
     })
 

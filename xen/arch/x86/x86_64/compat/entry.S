@@ -18,15 +18,16 @@ ENTRY(entry_int82)
         pushq $0
         movl  $HYPERCALL_VECTOR, 4(%rsp)
         SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
+        mov   %rsp, %r12
 
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
+        SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         CR4_PV32_RESTORE
 
         GET_CURRENT(bx)
 
-        mov   %rsp, %rdi
+        mov   %r12, %rdi
         call  do_entry_int82
 
 /* %rbx: struct vcpu */
@@ -201,7 +202,6 @@ ENTRY(compat_post_handle_exception)
 /* See lstar_enter for entry register state. */
 ENTRY(cstar_enter)
         sti
-        CR4_PV32_RESTORE
         movq  8(%rsp),%rax /* Restore %rax. */
         movq  $FLAT_KERNEL_SS,8(%rsp)
         pushq %r11
@@ -210,10 +210,12 @@ ENTRY(cstar_enter)
         pushq $0
         movl  $TRAP_syscall, 4(%rsp)
         SAVE_ALL
+        movq  %rsp, %r12
 
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
+        SPEC_CTRL_ENTRY_FROM_PV /* Req: %r12=regs, %rsp=cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
+        CR4_PV32_RESTORE
         GET_CURRENT(bx)
         movq  VCPU_domain(%rbx),%rcx
         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)

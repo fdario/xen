@@ -144,7 +144,8 @@
 
 .macro DO_SPEC_CTRL_ENTRY maybexen:req ibrs_val:req
 /*
- * Requires %rsp=regs (also cpuinfo if !maybexen)
+ * Requires %r12=regs
+ * Requires %rsp=stack_end (if !maybexen)
  * Requires %r14=stack_end (if maybexen)
  * Clobbers %rax, %rcx, %rdx
  *
@@ -162,7 +163,7 @@
      */
     .if \maybexen
         /* Branchless `if ( !xen ) clear_shadowing` */
-        testb $3, UREGS_cs(%rsp)
+        testb $3, UREGS_cs(%r12)
         setz %al
         and %al, STACK_CPUINFO_FIELD(use_shadow_spec_ctrl)(%r14)
     .else
@@ -197,7 +198,7 @@
 
 .macro DO_SPEC_CTRL_EXIT_TO_GUEST
 /*
- * Requires %eax=spec_ctrl, %rsp=regs/cpuinfo
+ * Requires %eax=spec_ctrl, %rsp=cpuinfo
  * Clobbers %rcx, %rdx
  *
  * When returning to guest context, set up SPEC_CTRL shadowing and load the
@@ -241,7 +242,7 @@
 #define SPEC_CTRL_ENTRY_FROM_INTR                                       \
     ALTERNATIVE __stringify(ASM_NOP40),                                 \
         DO_OVERWRITE_RSB, X86_FEATURE_RSB_NATIVE;                       \
-    ALTERNATIVE_2 __stringify(ASM_NOP29),                               \
+    ALTERNATIVE_2 __stringify(ASM_NOP30),                               \
         __stringify(DO_SPEC_CTRL_ENTRY maybexen=1                       \
                     ibrs_val=SPEC_CTRL_IBRS),                           \
         X86_FEATURE_XEN_IBRS_SET,                                       \
@@ -263,7 +264,7 @@
 /* TODO: Drop these when the alternatives infrastructure is NMI/#MC safe. */
 .macro SPEC_CTRL_ENTRY_FROM_INTR_IST
 /*
- * Requires %rsp=regs, %r14=stack_end
+ * Requires %r12=regs, %r14=stack_end
  * Clobbers %rax, %rcx, %rdx
  *
  * This is logical merge of DO_OVERWRITE_RSB and DO_SPEC_CTRL_ENTRY
@@ -282,7 +283,7 @@
     jz .L\@_skip_wrmsr
 
     xor %edx, %edx
-    testb $3, UREGS_cs(%rsp)
+    testb $3, UREGS_cs(%r12)
     setz %dl
     and %dl, STACK_CPUINFO_FIELD(use_shadow_spec_ctrl)(%r14)
 
