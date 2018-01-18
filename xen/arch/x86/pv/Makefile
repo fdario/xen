@@ -13,6 +13,7 @@ obj-y += mm.o
 obj-y += ro-page-fault.o
 obj-$(CONFIG_PV_SHIM) += shim.o
 obj-y += traps.o
+obj-y += xpti.o
 
 obj-bin-y += dom0_build.init.o
 obj-bin-y += gpr_switch.o

@@ -1926,6 +1926,24 @@ In the case that x2apic is in use, this option switches between physical and
 clustered mode.  The default, given no hint from the **FADT**, is cluster
 mode.
 
+### xpti
+> `= nodom0 | default | <boolean>`
+
+> Default: `false` on AMD hardware, `true` everywhere else.
+
+> Can be modified at runtime
+
+Override default selection of whether to isolate 64-bit PV guest page
+tables.
+
+`true` activates page table isolation even on AMD hardware.
+
+`false` deactivates page table isolation on all systems.
+
+`nodom0` deactivates page table isolation for dom0.
+
+`default` switch to default settings.
+
 ### xsave
 > `= <boolean>`
 

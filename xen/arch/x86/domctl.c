@@ -31,6 +31,7 @@
 #include <xen/vm_event.h>
 #include <public/vm_event.h>
 #include <asm/mem_sharing.h>
+#include <asm/pv/mm.h>
 #include <asm/xstate.h>
 #include <asm/debugger.h>
 #include <asm/psr.h>
@@ -610,6 +611,9 @@ long arch_do_domctl(
             ret = switch_compat(d);
         else
             ret = -EINVAL;
+
+        if ( ret == 0 )
+            ret = xpti_domain_init(d);
         break;
 
     case XEN_DOMCTL_get_address_size:

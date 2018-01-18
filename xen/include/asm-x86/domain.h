@@ -247,6 +247,8 @@ struct time_scale {
     u32 mul_frac;
 };
 
+struct xpti_domain;
+
 struct pv_domain
 {
     l1_pgentry_t **gdt_ldt_l1tab;
@@ -257,6 +259,8 @@ struct pv_domain
     struct mapcache_domain mapcache;
 
     struct cpuidmasks *cpuidmasks;
+
+    struct xpti_domain *xpti;
 };
 
 struct monitor_write_data {

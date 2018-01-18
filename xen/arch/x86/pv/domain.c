@@ -10,6 +10,7 @@
 #include <xen/sched.h>
 
 #include <asm/pv/domain.h>
+#include <asm/pv/mm.h>
 
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef mfn_to_page
@@ -174,6 +175,8 @@ void pv_domain_destroy(struct domain *d)
 
     free_xenheap_page(d->arch.pv_domain.gdt_ldt_l1tab);
     d->arch.pv_domain.gdt_ldt_l1tab = NULL;
+
+    xpti_domain_destroy(d);
 }
 
 

@@ -31,6 +31,19 @@ void pv_destroy_gdt(struct vcpu *v);
 bool pv_map_ldt_shadow_page(unsigned int off);
 bool pv_destroy_ldt(struct vcpu *v);
 
+int xpti_domain_init(struct domain *d);
+void xpti_domain_destroy(struct domain *d);
+
+static inline bool is_domain_xpti_active(const struct domain *d)
+{
+    return is_pv_domain(d) && d->arch.pv_domain.xpti;
+}
+
+static inline bool is_vcpu_xpti_active(const struct vcpu *v)
+{
+    return is_domain_xpti_active(v->domain);
+}
+
 #else
 
 #include <xen/errno.h>
@@ -51,6 +64,13 @@ static inline void pv_destroy_gdt(struct vcpu *v) { ASSERT_UNREACHABLE(); }
 static inline bool pv_map_ldt_shadow_page(unsigned int off) { return false; }
 static inline bool pv_destroy_ldt(struct vcpu *v)
 { ASSERT_UNREACHABLE(); return false; }
+
+static inline int xpti_domain_init(struct domain *d) { return 0; }
+static inline void xpti_domain_destroy(struct domain *d) { }
+
+static inline bool is_domain_xpti_active(const struct domain *d)
+{ return false; }
+static inline bool is_vcpu_xpti_active(const struct vcpu *v) { return false; }
 
 #endif
 

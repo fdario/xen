@@ -707,6 +707,9 @@ int __init dom0_construct_pv(struct domain *d,
             cpu = p->processor;
     }
 
+    if ( !is_pv_32bit_domain(d) )
+        xpti_domain_init(d);
+
     d->arch.paging.mode = 0;
 
     /* Set up CR3 value for write_ptbase */
