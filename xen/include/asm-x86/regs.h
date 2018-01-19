@@ -7,6 +7,8 @@
 #define guest_mode(r)                                                         \
 ({                                                                            \
     unsigned long diff = (char *)guest_cpu_user_regs() - (char *)(r);         \
+    if ( diff >= STACK_SIZE )                                                 \
+        diff = (char *)&get_cpu_info()->guest_cpu_user_regs - (char *)(r);    \
     /* Frame pointer must point into current CPU stack. */                    \
     ASSERT(diff < STACK_SIZE);                                                \
     /* If not a guest frame, it must be a hypervisor frame. */                \

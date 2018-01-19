@@ -185,6 +185,11 @@ do {                                                     \
         (((u32)(addr) & 0x00FF0000U) >> 16);             \
 } while (0)
 
+#define _set_tssldt_type(desc,type)                      \
+do {                                                     \
+    ((u8 *)&(desc)[0].b)[1] = (type) | 0x80;             \
+} while (0)
+
 struct __packed desc_ptr {
 	unsigned short limit;
 	unsigned long base;

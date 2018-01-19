@@ -1514,6 +1514,18 @@ void paravirt_ctxt_switch_from(struct vcpu *v)
      */
     if ( unlikely(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
         write_debugreg(7, 0);
+
+    if ( v->domain->arch.pv_domain.xpti )
+    {
+        unsigned long stub_va = this_cpu(stubs.addr);
+
+        wrmsrl(MSR_LSTAR, stub_va);
+        wrmsrl(MSR_CSTAR, stub_va + STUB_TRAMPOLINE_SIZE_PERCPU);
+        if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ||
+             boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR )
+            wrmsrl(MSR_IA32_SYSENTER_ESP,
+                   (unsigned long)&get_cpu_info()->guest_cpu_user_regs.es);
+    }
 }
 
 void paravirt_ctxt_switch_to(struct vcpu *v)
@@ -1594,22 +1606,42 @@ static inline bool need_full_gdt(const struct domain *d)
     return is_pv_domain(d) && !is_idle_domain(d);
 }
 
+/*
+ * Get address of registers on stack: this is either on the per physical cpu
+ * stack (XPTI is off) ot on the per-vcpu stack (XPTI is on)
+ */
+static inline struct cpu_user_regs *get_regs_on_stack(struct vcpu *v)
+{
+    return is_vcpu_xpti_active(v) ? v->arch.pv_vcpu.stack_regs
+                                  : &get_cpu_info()->guest_cpu_user_regs;
+}
+
+static inline void copy_user_regs_from_stack(struct vcpu *v)
+{
+    memcpy(&v->arch.user_regs, get_regs_on_stack(v), CTXT_SWITCH_STACK_BYTES);
+}
+
+static inline void copy_user_regs_to_stack(struct vcpu *v)
+{
+    memcpy(get_regs_on_stack(v), &v->arch.user_regs, CTXT_SWITCH_STACK_BYTES);
+}
+
 static void __context_switch(void)
 {
-    struct cpu_user_regs *stack_regs = guest_cpu_user_regs();
     unsigned int          cpu = smp_processor_id();
     struct vcpu          *p = per_cpu(curr_vcpu, cpu);
     struct vcpu          *n = current;
     struct domain        *pd = p->domain, *nd = n->domain;
     struct desc_struct   *gdt;
     struct desc_ptr       gdt_desc;
+    bool                  is_pv_gdt;
 
     ASSERT(p != n);
     ASSERT(!vcpu_cpu_dirty(n));
 
     if ( !is_idle_domain(pd) )
     {
-        memcpy(&p->arch.user_regs, stack_regs, CTXT_SWITCH_STACK_BYTES);
+        copy_user_regs_from_stack(p);
         vcpu_save_fpu(p);
         pd->arch.ctxt_switch->from(p);
     }
@@ -1625,7 +1657,7 @@ static void __context_switch(void)
 
     if ( !is_idle_domain(nd) )
     {
-        memcpy(stack_regs, &n->arch.user_regs, CTXT_SWITCH_STACK_BYTES);
+        copy_user_regs_to_stack(n);
         if ( cpu_has_xsave )
         {
             u64 xcr0 = n->arch.xcr0 ?: XSTATE_FP_SSE;
@@ -1644,7 +1676,7 @@ static void __context_switch(void)
 
     gdt = !is_pv_32bit_domain(nd) ? per_cpu(gdt_table, cpu) :
                                     per_cpu(compat_gdt_table, cpu);
-    if ( need_full_gdt(nd) )
+    if ( need_full_gdt(nd) && !nd->arch.pv_domain.xpti )
     {
         unsigned long mfn = virt_to_mfn(gdt);
         l1_pgentry_t *pl1e = pv_gdt_ptes(n);
@@ -1655,24 +1687,62 @@ static void __context_switch(void)
                       l1e_from_pfn(mfn + i, __PAGE_HYPERVISOR_RW));
     }
 
-    if ( need_full_gdt(pd) &&
-         ((p->vcpu_id != n->vcpu_id) || !need_full_gdt(nd)) )
+    is_pv_gdt = need_full_gdt(pd);
+    if ( is_pv_gdt &&
+         ((p->vcpu_id != n->vcpu_id) || !need_full_gdt(nd) ||
+          pd->arch.pv_domain.xpti) )
     {
         gdt_desc.limit = LAST_RESERVED_GDT_BYTE;
         gdt_desc.base  = (unsigned long)(gdt - FIRST_RESERVED_GDT_ENTRY);
 
+        if ( pd->arch.pv_domain.xpti )
+            _set_tssldt_type(gdt + TSS_ENTRY - FIRST_RESERVED_GDT_ENTRY,
+                             SYS_DESC_tss_avail);
+
         lgdt(&gdt_desc);
+        is_pv_gdt = false;
+
+        if ( pd->arch.pv_domain.xpti )
+        {
+            ltr(TSS_ENTRY << 3);
+            get_cpu_info()->flags &= ~VCPUSTACK_ACTIVE;
+        }
     }
 
     write_ptbase(n);
 
     if ( need_full_gdt(nd) &&
-         ((p->vcpu_id != n->vcpu_id) || !need_full_gdt(pd)) )
+         ((p->vcpu_id != n->vcpu_id) || !is_pv_gdt || nd->arch.pv_domain.xpti) )
     {
         gdt_desc.limit = LAST_RESERVED_GDT_BYTE;
         gdt_desc.base = GDT_VIRT_START(n);
 
+        if ( nd->arch.pv_domain.xpti )
+        {
+            struct cpu_info *info;
+
+            gdt = (struct desc_struct *)GDT_VIRT_START(n);
+            gdt[PER_CPU_GDT_ENTRY].a = cpu;
+            _set_tssldt_type(gdt + TSS_ENTRY, SYS_DESC_tss_avail);
+            info = (struct cpu_info *)(XPTI_START(n) + STACK_SIZE) - 1;
+            info->stack_bottom_cpu = (unsigned long)guest_cpu_user_regs();
+        }
+
         lgdt(&gdt_desc);
+
+        if ( nd->arch.pv_domain.xpti )
+        {
+            unsigned long stub_va = XPTI_TRAMPOLINE(n);
+
+            ltr(TSS_ENTRY << 3);
+            get_cpu_info()->flags |= VCPUSTACK_ACTIVE;
+            wrmsrl(MSR_LSTAR, stub_va);
+            wrmsrl(MSR_CSTAR, stub_va + STUB_TRAMPOLINE_SIZE_PERVCPU);
+            if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ||
+                 boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR )
+                wrmsrl(MSR_IA32_SYSENTER_ESP,
+                       (unsigned long)&guest_cpu_user_regs()->es);
+        }
     }
 
     if ( pd != nd )

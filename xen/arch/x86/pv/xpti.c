@@ -85,6 +85,7 @@ static int xpti_vcpu_init(struct vcpu *v)
     struct page_info *pg;
     void *ptr;
     struct cpu_info *info;
+    struct desc_struct *gdt;
     unsigned long stack_bottom;
     int rc;
 
@@ -138,6 +139,22 @@ static int xpti_vcpu_init(struct vcpu *v)
     unmap_domain_page(ptr);
     rc = modflags_perdomain_mapping(d, XPTI_TRAMPOLINE(v), 0,
                                     _PAGE_NX | _PAGE_RW | _PAGE_DIRTY);
+
+    /* Map GDT. */
+    BUILD_BUG_ON(NR_RESERVED_GDT_PAGES > 1);
+    gdt = (struct desc_struct *)GDT_VIRT_START(v) + FIRST_RESERVED_GDT_ENTRY;
+    rc = create_perdomain_mapping(v->domain, (unsigned long)gdt,
+                                  NR_RESERVED_GDT_PAGES, NULL, &pg);
+    if ( !rc )
+    {
+        gdt = __map_domain_page(pg);
+        memcpy(gdt, boot_cpu_gdt_table, NR_RESERVED_GDT_BYTES);
+        _set_tssldt_desc(gdt + TSS_ENTRY - FIRST_RESERVED_GDT_ENTRY,
+                     XPTI_TSS(v),
+                     offsetof(struct tss_struct, __cacheline_filler) - 1,
+                     SYS_DESC_tss_avail);
+        unmap_domain_page(gdt);
+    }
 
  done:
     return rc;
