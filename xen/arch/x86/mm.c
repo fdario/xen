@@ -504,6 +504,8 @@ void free_shared_domheap_page(struct page_info *page)
 
 void make_cr3(struct vcpu *v, mfn_t mfn)
 {
+    if ( is_vcpu_xpti_active(v) )
+        xpti_make_cr3(v, mfn_x(mfn));
     v->arch.cr3 = mfn_x(mfn) << PAGE_SHIFT;
 }
 
@@ -1807,6 +1809,8 @@ static int free_l4_table(struct page_info *page)
     if ( rc >= 0 )
     {
         atomic_dec(&d->arch.pv_domain.nr_l4_pages);
+        if ( d->arch.pv_domain.xpti )
+            xpti_free_l4(d, pfn);
         rc = 0;
     }
 

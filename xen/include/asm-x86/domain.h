@@ -508,6 +508,7 @@ struct pv_vcpu
 
     /* If XPTI is active: pointer to user regs on stack. */
     struct cpu_user_regs *stack_regs;
+    unsigned xen_cr3_shadow;    /* XPTI: index of current shadow L4 */
 };
 
 typedef enum __packed {

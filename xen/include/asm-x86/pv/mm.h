@@ -34,6 +34,8 @@ bool pv_destroy_ldt(struct vcpu *v);
 void xpti_vcpu_destroy(struct vcpu *v);
 int xpti_domain_init(struct domain *d);
 void xpti_domain_destroy(struct domain *d);
+void xpti_make_cr3(struct vcpu *v, unsigned long mfn);
+void xpti_free_l4(struct domain *d, unsigned long mfn);
 
 static inline bool is_domain_xpti_active(const struct domain *d)
 {
@@ -69,6 +71,8 @@ static inline bool pv_destroy_ldt(struct vcpu *v)
 static inline void xpti_vcpu_init(struct vcpu *v) { }
 static inline int xpti_domain_init(struct domain *d) { return 0; }
 static inline void xpti_domain_destroy(struct domain *d) { }
+static inline void xpti_make_cr3(struct vcpu *v, unsigned long mfn) { }
+static inline void xpti_free_l4(struct domain *d, unsigned long mfn) { }
 
 static inline bool is_domain_xpti_active(const struct domain *d)
 { return false; }

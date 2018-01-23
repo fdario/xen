@@ -22,11 +22,100 @@
 #include <xen/domain_page.h>
 #include <xen/errno.h>
 #include <xen/init.h>
+#include <xen/keyhandler.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
+#include <asm/bitops.h>
+
+/*
+ * For each L4 page table of the guest we need a shadow for the hypervisor.
+ *
+ * Such a shadow is considered to be active when the guest has loaded its
+ * %cr3 on any vcpu with the MFN of the L4 page the shadow is associated
+ * with.
+ *
+ * The shadows are referenced via an array of struct xpti_l4pg. This array
+ * is set up at domain creation time and sized by number of vcpus of the
+ * domain (N_L4_PERVCPU * max_vcpus). The index into this array is used to
+ * address the single xpti_l4pg instances.
+ *
+ * A xpti_l4pg associated to a guest's L4 page table is put in a linked list
+ * anchored in the xpti_l4ref hash array. The index into this array is taken
+ * from the lower bits of the guest's L4 page table MFN.
+ * The hash lists are sorted by a LRU mechanism. Additionally all xpti_l4pg's
+ * in any hash list but those currently being active are in a single big
+ * LRU list.
+ *
+ * Whenever a guest L4 page table is being unpinned its associated shadow is
+ * put in a free list to avoid the need to allocate a new shadow from the heap
+ * when a new L4 page is being pinned. This free list is limited in its length
+ * to (N_L4_FREE_PERVCPU * max_vcpus).
+ *
+ * New shadows are obtained from the following resources (first hit wins):
+ * - from the free list
+ * - if maximum number of shadows not yet reached allocation from the heap
+ * - from the end of the global lru list
+ *
+ * At domain creation the free list is initialized with N_L4_MIN_PERVCPU per
+ * vcpu free shadows in order to have a minimal working set technically not
+ * requiring additional allocations.
+ */
+
+#define XPTI_DEBUG
+
+#define N_L4_PERVCPU      64
+#define N_L4_FREE_PERVCPU 16
+#define N_L4_MIN_PERVCPU   2
+
+#define L4_INVALID  ~0
+
+#define max_l4(d)    ((d)->max_vcpus * N_L4_PERVCPU)
+#define max_free(xd) (N_L4_FREE_PERVCPU * (xd)->domain->max_vcpus)
+#define min_free(xd) (N_L4_MIN_PERVCPU * (xd)->domain->max_vcpus)
+
+#ifdef XPTI_DEBUG
+#define XPTI_CNT(what) xd->what++
+#else
+#define XPTI_CNT(what)
+#endif
+
+struct xpti_l4ref {
+    unsigned idx;              /* First shadow */
+};
+
+struct xpti_l4pg {
+    unsigned long guest_mfn;   /* MFN of guest L4 page */
+    unsigned long xen_mfn;     /* MFN of associated shadow */
+    unsigned ref_next;         /* Next shadow, anchored in xpti_l4ref */
+    unsigned lru_next;         /* Global LRU list */
+    unsigned lru_prev;
+    unsigned active_cnt;       /* Number of vcpus the shadow is active on */
+};
 
 struct xpti_domain {
-    int pad;
+    struct xpti_l4ref *l4ref;  /* Hash array */
+    struct xpti_l4pg *l4pg;    /* Shadow admin array */
+    unsigned l4ref_size;       /* Hash size */
+    unsigned n_alloc;          /* Number of allocated shadows */
+    unsigned n_free;           /* Number of free shadows */
+    unsigned lru_first;        /* LRU list of associated shadows */
+    unsigned lru_last;
+    unsigned free_first;       /* List of free shadows */
+    unsigned unused_first;     /* List of unused slots */
+    spinlock_t lock;           /* Protects all shadow lists */
+    struct domain *domain;
+    struct tasklet tasklet;
+#ifdef XPTI_DEBUG
+    unsigned cnt_alloc;
+    unsigned cnt_free;
+    unsigned cnt_getfree;
+    unsigned cnt_putfree;
+    unsigned cnt_getforce;
+    unsigned cnt_activate;
+    unsigned cnt_deactivate;
+    unsigned cnt_newl4;
+    unsigned cnt_freel4;
+#endif
 };
 
 static __read_mostly enum {
@@ -63,16 +152,369 @@ static int parse_xpti(const char *s)
 
 custom_runtime_param("xpti", parse_xpti);
 
+static unsigned xpti_shadow_add(struct xpti_domain *xd, unsigned long mfn)
+{
+    unsigned new = xd->unused_first;
+    struct xpti_l4pg *l4pg = xd->l4pg + new;
+
+    if ( xd->n_alloc >= max_l4(xd->domain) )
+        new = L4_INVALID;
+    if ( new != L4_INVALID )
+    {
+        XPTI_CNT(cnt_alloc);
+        xd->unused_first = l4pg->lru_next;
+        l4pg->xen_mfn = mfn;
+        xd->n_alloc++;
+    }
+
+    return new;
+}
+
+static void *xpti_shadow_free(struct xpti_domain *xd, unsigned free)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + free;
+    void *virt;
+
+    XPTI_CNT(cnt_free);
+    ASSERT(xd->n_alloc);
+    virt = mfn_to_virt(l4pg->xen_mfn);
+    l4pg->lru_next = xd->unused_first;
+    xd->unused_first = free;
+    xd->n_alloc--;
+
+    return virt;
+}
+
+static unsigned xpti_shadow_getfree(struct xpti_domain *xd)
+{
+    unsigned free = xd->free_first;
+    struct xpti_l4pg *l4pg = xd->l4pg + free;
+
+    if ( free != L4_INVALID )
+    {
+        XPTI_CNT(cnt_getfree);
+        xd->free_first = l4pg->lru_next;
+        ASSERT(xd->n_free);
+        xd->n_free--;
+        l4pg->lru_next = L4_INVALID;
+
+        if ( !xd->n_free && xd->n_alloc < max_l4(xd->domain) &&
+             !xd->domain->is_dying )
+            tasklet_schedule(&xd->tasklet);
+    }
+
+    return free;
+}
+
+static void xpti_shadow_putfree(struct xpti_domain *xd, unsigned free)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + free;
+
+    ASSERT(free != L4_INVALID);
+    XPTI_CNT(cnt_putfree);
+    l4pg->lru_prev = L4_INVALID;
+    l4pg->lru_next = xd->free_first;
+    xd->free_first = free;
+    xd->n_free++;
+
+    if ( xd->n_free > max_free(xd) && !xd->domain->is_dying )
+        tasklet_schedule(&xd->tasklet);
+}
+
+static struct xpti_l4ref *xpti_get_hashentry_mfn(struct xpti_domain *xd,
+                                                 unsigned long mfn)
+{
+    return xd->l4ref + (mfn & (xd->l4ref_size - 1));
+}
+
+static struct xpti_l4ref *xpti_get_hashentry(struct xpti_domain *xd,
+                                             unsigned idx)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + idx;
+
+    return xpti_get_hashentry_mfn(xd, l4pg->guest_mfn);
+}
+
+static unsigned xpti_shadow_from_hashlist(struct xpti_domain *xd,
+                                          unsigned long mfn)
+{
+    struct xpti_l4ref *l4ref;
+    unsigned ref_idx;
+
+    l4ref = xpti_get_hashentry_mfn(xd, mfn);
+    ref_idx = l4ref->idx;
+    while ( ref_idx != L4_INVALID && xd->l4pg[ref_idx].guest_mfn != mfn )
+        ref_idx = xd->l4pg[ref_idx].ref_next;
+
+    return ref_idx;
+}
+
+static void xpti_shadow_deactivate(struct xpti_domain *xd, unsigned idx)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + idx;
+    struct xpti_l4ref *l4ref;
+    unsigned ref_idx;
+
+    /* Decrement active count. If still > 0 we are done. */
+    XPTI_CNT(cnt_deactivate);
+    ASSERT(l4pg->active_cnt > 0);
+    l4pg->active_cnt--;
+    if ( l4pg->active_cnt )
+        return;
+
+    /* Put in hash list at first position for its hash entry. */
+    l4ref = xpti_get_hashentry(xd, idx);
+    ref_idx = l4ref->idx;
+    ASSERT(ref_idx != L4_INVALID);
+    /* Only need to do something if not already in front. */
+    if ( ref_idx != idx )
+    {
+        /* Search for entry referencing our element. */
+        while ( xd->l4pg[ref_idx].ref_next != idx )
+              ref_idx = xd->l4pg[ref_idx].ref_next;
+
+        /* Dequeue and put to front of list. */
+        xd->l4pg[ref_idx].ref_next = l4pg->ref_next;
+        l4pg->ref_next = l4ref->idx;
+        l4ref->idx = idx;
+    }
+
+    /* Put into LRU list at first position. */
+    l4pg->lru_next = xd->lru_first;
+    l4pg->lru_prev = L4_INVALID;
+    xd->lru_first = idx;
+    if ( xd->lru_last == L4_INVALID )
+        xd->lru_last = idx;
+    else if ( l4pg->lru_next != L4_INVALID )
+        xd->l4pg[l4pg->lru_next].lru_prev = idx;
+}
+
+static void xpti_shadow_lru_remove(struct xpti_domain *xd, unsigned idx)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + idx;
+    unsigned prev = l4pg->lru_prev;
+    unsigned next = l4pg->lru_next;
+
+    if ( prev != L4_INVALID )
+        xd->l4pg[prev].lru_next = next;
+    else if ( xd->lru_first == idx )
+        xd->lru_first = next;
+    if ( next != L4_INVALID )
+        xd->l4pg[next].lru_prev = prev;
+    else if ( xd->lru_last == idx )
+        xd->lru_last = prev;
+    l4pg->lru_prev = L4_INVALID;
+    l4pg->lru_next = L4_INVALID;
+}
+
+static void xpti_shadow_hash_remove(struct xpti_domain *xd, unsigned idx)
+{
+    struct xpti_l4pg *l4pg = xd->l4pg + idx;
+    struct xpti_l4ref *l4ref;
+    unsigned ref_idx;
+
+    l4ref = xpti_get_hashentry(xd, idx);
+    ref_idx = l4ref->idx;
+    ASSERT(ref_idx != L4_INVALID);
+    if ( ref_idx == idx )
+    {
+        l4ref->idx = l4pg->ref_next;
+    }
+    else
+    {
+        while ( xd->l4pg[ref_idx].ref_next != idx )
+            ref_idx = xd->l4pg[ref_idx].ref_next;
+        xd->l4pg[ref_idx].ref_next = l4pg->ref_next;
+    }
+}
+
+static unsigned xpti_shadow_getforce(struct xpti_domain *xd)
+{
+    unsigned idx = xd->lru_last;
+
+    XPTI_CNT(cnt_getforce);
+    ASSERT(idx != L4_INVALID);
+    ASSERT(!xd->l4pg[idx].active_cnt);
+
+    xpti_shadow_hash_remove(xd, idx);
+    xpti_shadow_lru_remove(xd, idx);
+
+    return idx;
+}
+
+static unsigned xpti_shadow_get(struct xpti_domain *xd, unsigned long mfn)
+{
+    unsigned idx;
+    struct xpti_l4ref *l4ref;
+    struct xpti_l4pg *l4pg;
+
+    idx = xpti_shadow_from_hashlist(xd, mfn);
+    if ( idx != L4_INVALID )
+    {
+        /* Remove from LRU list if currently not active. */
+        if ( !xd->l4pg[idx].active_cnt )
+            xpti_shadow_lru_remove(xd, idx);
+
+        return idx;
+    }
+
+    XPTI_CNT(cnt_newl4);
+    idx = xpti_shadow_getfree(xd);
+    if ( idx == L4_INVALID )
+        idx = xpti_shadow_getforce(xd);
+
+    /* Set mfn and insert in hash list. */
+    l4ref = xpti_get_hashentry_mfn(xd, mfn);
+    l4pg = xd->l4pg + idx;
+    l4pg->guest_mfn = mfn;
+    l4pg->ref_next = l4ref->idx;
+    l4ref->idx = idx;
+
+    return idx;
+}
+
+static unsigned xpti_shadow_activate(struct xpti_domain *xd, unsigned long mfn)
+{
+    unsigned idx;
+    struct xpti_l4pg *l4pg;
+
+    XPTI_CNT(cnt_activate);
+    idx = xpti_shadow_get(xd, mfn);
+    l4pg = xd->l4pg + idx;
+
+    l4pg->active_cnt++;
+
+    return idx;
+}
+
+void xpti_make_cr3(struct vcpu *v, unsigned long mfn)
+{
+    struct xpti_domain *xd = v->domain->arch.pv_domain.xpti;
+    unsigned long flags;
+    unsigned idx;
+
+    spin_lock_irqsave(&xd->lock, flags);
+
+    idx = v->arch.pv_vcpu.xen_cr3_shadow;
+
+    /* First activate new shadow. */
+    v->arch.pv_vcpu.xen_cr3_shadow = xpti_shadow_activate(xd, mfn);
+
+    /* Deactivate old shadow if applicable. */
+    if ( idx != L4_INVALID )
+        xpti_shadow_deactivate(xd, idx);
+
+    spin_unlock_irqrestore(&xd->lock, flags);
+}
+
+void xpti_free_l4(struct domain *d, unsigned long mfn)
+{
+    struct xpti_domain *xd = d->arch.pv_domain.xpti;
+    unsigned long flags;
+    unsigned idx;
+
+    spin_lock_irqsave(&xd->lock, flags);
+
+    idx = xpti_shadow_from_hashlist(xd, mfn);
+    if ( idx != L4_INVALID )
+    {
+        XPTI_CNT(cnt_freel4);
+        /* Might still be active in a vcpu to be destroyed. */
+        if ( !xd->l4pg[idx].active_cnt )
+        {
+            xpti_shadow_lru_remove(xd, idx);
+            xpti_shadow_hash_remove(xd, idx);
+            xpti_shadow_putfree(xd, idx);
+        }
+    }
+
+    spin_unlock_irqrestore(&xd->lock, flags);
+}
+
+static void xpti_tasklet(unsigned long _xd)
+{
+    struct xpti_domain *xd = (struct xpti_domain *)_xd;
+    void *virt;
+    unsigned long flags;
+    unsigned free;
+
+    spin_lock_irqsave(&xd->lock, flags);
+
+    while ( xd->n_free < min_free(xd) && xd->n_alloc < max_l4(xd->domain) )
+    {
+        spin_unlock_irqrestore(&xd->lock, flags);
+        virt = alloc_xenheap_pages(0, MEMF_node(domain_to_node(xd->domain)));
+        spin_lock_irqsave(&xd->lock, flags);
+        if ( !virt )
+            break;
+        free = xpti_shadow_add(xd, virt_to_mfn(virt));
+        if ( free == L4_INVALID )
+        {
+            spin_unlock_irqrestore(&xd->lock, flags);
+            free_xenheap_page(virt);
+            spin_lock_irqsave(&xd->lock, flags);
+            break;
+        }
+        xpti_shadow_putfree(xd, free);
+    }
+
+    while ( xd->n_free > max_free(xd) )
+    {
+        free = xpti_shadow_getfree(xd);
+        ASSERT(free != L4_INVALID);
+        virt = xpti_shadow_free(xd, free);
+        spin_unlock_irqrestore(&xd->lock, flags);
+        free_xenheap_page(virt);
+        spin_lock_irqsave(&xd->lock, flags);
+    }
+
+    spin_unlock_irqrestore(&xd->lock, flags);
+}
+
 void xpti_domain_destroy(struct domain *d)
 {
-    xfree(d->arch.pv_domain.xpti);
+    struct xpti_domain *xd = d->arch.pv_domain.xpti;
+    unsigned idx;
+
+    if ( !xd )
+        return;
+
+    tasklet_kill(&xd->tasklet);
+
+    while ( xd->lru_first != L4_INVALID ) {
+        idx = xd->lru_first;
+        xpti_shadow_lru_remove(xd, idx);
+        free_xenheap_page(xpti_shadow_free(xd, idx));
+    }
+
+    while ( xd->n_free ) {
+        idx = xpti_shadow_getfree(xd);
+        free_xenheap_page(xpti_shadow_free(xd, idx));
+    }
+
+    xfree(xd->l4pg);
+    xfree(xd->l4ref);
+    xfree(xd);
     d->arch.pv_domain.xpti = NULL;
 }
 
 void xpti_vcpu_destroy(struct vcpu *v)
 {
-    if ( v->domain->arch.pv_domain.xpti )
+    struct xpti_domain *xd = v->domain->arch.pv_domain.xpti;
+    unsigned long flags;
+
+    if ( xd )
     {
+        spin_lock_irqsave(&xd->lock, flags);
+
+        if ( v->arch.pv_vcpu.xen_cr3_shadow != L4_INVALID )
+        {
+            xpti_shadow_deactivate(xd, v->arch.pv_vcpu.xen_cr3_shadow);
+            v->arch.pv_vcpu.xen_cr3_shadow = L4_INVALID;
+        }
+
+        spin_unlock_irqrestore(&xd->lock, flags);
+
         free_xenheap_page(v->arch.pv_vcpu.stack_regs);
         v->arch.pv_vcpu.stack_regs = NULL;
         destroy_perdomain_mapping(v->domain, XPTI_START(v), STACK_PAGES);
@@ -156,6 +598,8 @@ static int xpti_vcpu_init(struct vcpu *v)
         unmap_domain_page(gdt);
     }
 
+    v->arch.pv_vcpu.xen_cr3_shadow = L4_INVALID;
+
  done:
     return rc;
 }
@@ -163,8 +607,11 @@ static int xpti_vcpu_init(struct vcpu *v)
 int xpti_domain_init(struct domain *d)
 {
     bool xpti = false;
-    int ret = 0;
+    int ret = -ENOMEM;
     struct vcpu *v;
+    struct xpti_domain *xd;
+    void *virt;
+    unsigned i, new;
 
     if ( !is_pv_domain(d) || is_pv_32bit_domain(d) )
         return 0;
@@ -189,11 +636,43 @@ int xpti_domain_init(struct domain *d)
     if ( !xpti )
         return 0;
 
-    d->arch.pv_domain.xpti = xmalloc(struct xpti_domain);
-    if ( !d->arch.pv_domain.xpti )
-    {
-        ret = -ENOMEM;
+    xd = xzalloc(struct xpti_domain);
+    if ( !xd )
         goto done;
+    d->arch.pv_domain.xpti = xd;
+    xd->domain = d;
+    xd->lru_first = L4_INVALID;
+    xd->lru_last = L4_INVALID;
+    xd->free_first = L4_INVALID;
+
+    spin_lock_init(&xd->lock);
+    tasklet_init(&xd->tasklet, xpti_tasklet, (unsigned long)xd);
+
+    xd->l4ref_size = 1 << (fls(max_l4(d)) - 1);
+    xd->l4ref = xzalloc_array(struct xpti_l4ref, xd->l4ref_size);
+    if ( !xd->l4ref )
+        goto done;
+    for ( i = 0; i < xd->l4ref_size; i++ )
+        xd->l4ref[i].idx = L4_INVALID;
+
+    xd->l4pg = xzalloc_array(struct xpti_l4pg, max_l4(d));
+    if ( !xd->l4pg )
+        goto done;
+    for ( i = 0; i < max_l4(d) - 1; i++ )
+    {
+        xd->l4pg[i].lru_next = i + 1;
+    }
+    xd->l4pg[i].lru_next = L4_INVALID;
+    xd->unused_first = 0;
+
+    for ( i = 0; i < min_free(xd); i++ )
+    {
+        virt = alloc_xenheap_pages(0, MEMF_node(domain_to_node(d)));
+        if ( !virt )
+            goto done;
+        new = xpti_shadow_add(xd, virt_to_mfn(virt));
+        ASSERT(new != L4_INVALID);
+        xpti_shadow_putfree(xd, new);
     }
 
     for_each_vcpu( d, v )
@@ -203,9 +682,79 @@ int xpti_domain_init(struct domain *d)
             goto done;
     }
 
+    ret = 0;
+
     printk("Enabling Xen Pagetable protection (XPTI) for Domain %d\n",
            d->domain_id);
 
  done:
     return ret;
 }
+
+static void xpti_dump_domain_info(struct domain *d)
+{
+    struct xpti_domain *xd = d->arch.pv_domain.xpti;
+    unsigned long flags;
+
+    if ( !is_pv_domain(d) || !xd )
+        return;
+
+    spin_lock_irqsave(&xd->lock, flags);
+
+    printk("Domain %d XPTI shadow pages: %u allocated, %u max, %u free\n",
+           d->domain_id, xd->n_alloc, max_l4(d), xd->n_free);
+
+#ifdef XPTI_DEBUG
+    printk("  alloc: %d, free: %d, getfree: %d, putfree: %d, getforce: %d\n",
+           xd->cnt_alloc, xd->cnt_free, xd->cnt_getfree, xd->cnt_putfree,
+           xd->cnt_getforce);
+    printk("  activate: %d, deactivate: %d, newl4: %d, freel4: %d\n",
+           xd->cnt_activate, xd->cnt_deactivate, xd->cnt_newl4,
+           xd->cnt_freel4);
+#endif
+
+    spin_unlock_irqrestore(&xd->lock, flags);
+}
+
+static void xpti_dump_info(unsigned char key)
+{
+    struct domain *d;
+    char *opt;
+
+    printk("'%c' pressed -> dumping XPTI info\n", key);
+
+    switch ( opt_xpti )
+    {
+    case XPTI_DEFAULT:
+        opt = "default";
+        break;
+    case XPTI_ON:
+        opt = "on";
+        break;
+    case XPTI_OFF:
+        opt = "off";
+        break;
+    case XPTI_NODOM0:
+        opt = "nodom0";
+        break;
+    default:
+        opt = "???";
+        break;
+    }
+
+    printk("XPTI global setting: %s\n", opt);
+
+    rcu_read_lock(&domlist_read_lock);
+
+    for_each_domain ( d )
+        xpti_dump_domain_info(d);
+
+    rcu_read_unlock(&domlist_read_lock);
+}
+
+static int __init xpti_key_init(void)
+{
+    register_keyhandler('X', xpti_dump_info, "dump XPTI info", 1);
+    return 0;
+}
+__initcall(xpti_key_init);

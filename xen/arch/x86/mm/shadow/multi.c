@@ -38,6 +38,7 @@ asm(".file \"" __OBJECT_FILE__ "\"");
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/cacheattr.h>
 #include <asm/mtrr.h>
+#include <asm/pv/mm.h>
 #include <asm/guest_pt.h>
 #include <public/sched.h>
 #include "private.h"
@@ -1895,6 +1896,8 @@ void sh_destroy_l4_shadow(struct domain *d, mfn_t smfn)
 
     /* Put the memory back in the pool */
     shadow_free(d, smfn);
+    if ( is_domain_xpti_active(d) )
+        xpti_free_l4(d, mfn_x(smfn));
 }
 
 void sh_destroy_l3_shadow(struct domain *d, mfn_t smfn)
