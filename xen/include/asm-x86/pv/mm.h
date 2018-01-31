@@ -36,6 +36,8 @@ int xpti_domain_init(struct domain *d);
 void xpti_domain_destroy(struct domain *d);
 void xpti_make_cr3(struct vcpu *v, unsigned long mfn);
 void xpti_free_l4(struct domain *d, unsigned long mfn);
+void xpti_update_l4(const struct domain *d, unsigned long mfn, unsigned slot,
+                    l4_pgentry_t e);
 
 static inline bool is_domain_xpti_active(const struct domain *d)
 {
@@ -73,6 +75,8 @@ static inline int xpti_domain_init(struct domain *d) { return 0; }
 static inline void xpti_domain_destroy(struct domain *d) { }
 static inline void xpti_make_cr3(struct vcpu *v, unsigned long mfn) { }
 static inline void xpti_free_l4(struct domain *d, unsigned long mfn) { }
+static inline void xpti_update_l4(const struct domain *d, unsigned long mfn,
+                                  unsigned slot, l4_pgentry_t e) { }
 
 static inline bool is_domain_xpti_active(const struct domain *d)
 { return false; }

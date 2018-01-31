@@ -1609,6 +1609,18 @@ void init_xen_l4_slots(l4_pgentry_t *l4t, mfn_t l4mfn,
                (ROOT_PAGETABLE_FIRST_XEN_SLOT + slots -
                 l4_table_offset(XEN_VIRT_START)) * sizeof(*l4t));
     }
+
+    if ( is_domain_xpti_active(d) )
+    {
+        unsigned slot;
+
+        for ( slot = ROOT_PAGETABLE_FIRST_XEN_SLOT;
+              slot <= ROOT_PAGETABLE_LAST_XEN_SLOT;
+              slot++ )
+            xpti_update_l4(d,
+                           mfn_x(mfn_eq(sl4mfn, INVALID_MFN) ? l4mfn : sl4mfn),
+                           slot, l4t[slot]);
+    }
 }
 
 bool fill_ro_mpt(const struct domain *d, mfn_t mfn)
@@ -1621,6 +1633,9 @@ bool fill_ro_mpt(const struct domain *d, mfn_t mfn)
         l4tab[l4_table_offset(RO_MPT_VIRT_START)] =
             idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)];
         ret = true;
+        if ( is_domain_xpti_active(d) )
+            xpti_update_l4(d, mfn_x(mfn), l4_table_offset(RO_MPT_VIRT_START),
+                           idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)]);
     }
     unmap_domain_page(l4tab);
 
@@ -1632,6 +1647,11 @@ void zap_ro_mpt(const struct domain *d, mfn_t mfn)
     l4_pgentry_t *l4tab = map_domain_page(mfn);
 
     l4tab[l4_table_offset(RO_MPT_VIRT_START)] = l4e_empty();
+
+    if ( is_domain_xpti_active(d) )
+        xpti_update_l4(d, mfn_x(mfn), l4_table_offset(RO_MPT_VIRT_START),
+                       l4e_empty());
+
     unmap_domain_page(l4tab);
 }
 
@@ -1682,6 +1702,8 @@ static int alloc_l4_table(struct page_info *page)
         }
 
         pl4e[i] = adjust_guest_l4e(pl4e[i], d);
+        if ( is_domain_xpti_active(d) )
+            xpti_update_l4(d, pfn, i, pl4e[i]);
     }
 
     if ( rc >= 0 )
@@ -2089,6 +2111,20 @@ static int mod_l3_entry(l3_pgentry_t *pl3e,
     return rc;
 }
 
+static bool update_l4pte(l4_pgentry_t *pl4e, l4_pgentry_t ol4e,
+                         l4_pgentry_t nl4e, unsigned long pfn,
+                         struct vcpu *v, bool preserve_ad)
+{
+    bool rc;
+
+    rc = UPDATE_ENTRY(l4, pl4e, ol4e, nl4e, pfn, v, preserve_ad);
+    if ( rc && is_vcpu_xpti_active(v) &&
+         (!paging_mode_shadow(v->domain) || !paging_get_hostmode(v)) )
+        xpti_update_l4(v->domain, pfn, pgentry_ptr_to_slot(pl4e), nl4e);
+
+    return rc;
+}
+
 /* Update the L4 entry at pl4e to new value nl4e. pl4e is within frame pfn. */
 static int mod_l4_entry(l4_pgentry_t *pl4e,
                         l4_pgentry_t nl4e,
@@ -2123,7 +2159,7 @@ static int mod_l4_entry(l4_pgentry_t *pl4e,
         if ( !l4e_has_changed(ol4e, nl4e, ~FASTPATH_FLAG_WHITELIST) )
         {
             nl4e = adjust_guest_l4e(nl4e, d);
-            rc = UPDATE_ENTRY(l4, pl4e, ol4e, nl4e, pfn, vcpu, preserve_ad);
+            rc = update_l4pte(pl4e, ol4e, nl4e, pfn, vcpu, preserve_ad);
             return rc ? 0 : -EFAULT;
         }
 
@@ -2133,14 +2169,13 @@ static int mod_l4_entry(l4_pgentry_t *pl4e,
         rc = 0;
 
         nl4e = adjust_guest_l4e(nl4e, d);
-        if ( unlikely(!UPDATE_ENTRY(l4, pl4e, ol4e, nl4e, pfn, vcpu,
-                                    preserve_ad)) )
+        if ( unlikely(!update_l4pte(pl4e, ol4e, nl4e, pfn, vcpu, preserve_ad)) )
         {
             ol4e = nl4e;
             rc = -EFAULT;
         }
     }
-    else if ( unlikely(!UPDATE_ENTRY(l4, pl4e, ol4e, nl4e, pfn, vcpu,
+    else if ( unlikely(!update_l4pte(pl4e, ol4e, nl4e, pfn, vcpu,
                                      preserve_ad)) )
     {
         return -EFAULT;

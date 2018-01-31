@@ -954,6 +954,8 @@ static int shadow_set_l4e(struct domain *d,
     /* Write the new entry */
     shadow_write_entries(sl4e, &new_sl4e, 1, sl4mfn);
     flags |= SHADOW_SET_CHANGED;
+    if ( is_domain_xpti_active(d) )
+        xpti_update_l4(d, mfn_x(sl4mfn), pgentry_ptr_to_slot(sl4e), new_sl4e);
 
     if ( shadow_l4e_get_flags(old_sl4e) & _PAGE_PRESENT )
     {

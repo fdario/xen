@@ -142,6 +142,9 @@ static __init void setup_pv_physmap(struct domain *d, unsigned long pgtbl_pfn,
             pl3e = __map_domain_page(page);
             clear_page(pl3e);
             *pl4e = l4e_from_page(page, L4_PROT);
+            if ( is_domain_xpti_active(d) )
+                xpti_update_l4(d, pgtbl_pfn, l4_table_offset(vphysmap_start),
+                               *pl4e);
         } else
             pl3e = map_l3t_from_l4e(*pl4e);
 

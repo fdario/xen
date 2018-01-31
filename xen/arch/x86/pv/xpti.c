@@ -342,6 +342,18 @@ static unsigned xpti_shadow_getforce(struct xpti_domain *xd)
     return idx;
 }
 
+static void xpti_init_xen_l4(struct xpti_domain *xd, struct xpti_l4pg *l4pg)
+{
+    unsigned i;
+    l4_pgentry_t *src, *dest;
+
+    src = map_domain_page(_mfn(l4pg->guest_mfn));
+    dest = mfn_to_virt(l4pg->xen_mfn);
+    for ( i = 0; i < L4_PAGETABLE_ENTRIES; i++ )
+        dest[i] = src[i];
+    unmap_domain_page(src);
+}
+
 static unsigned xpti_shadow_get(struct xpti_domain *xd, unsigned long mfn)
 {
     unsigned idx;
@@ -370,6 +382,9 @@ static unsigned xpti_shadow_get(struct xpti_domain *xd, unsigned long mfn)
     l4pg->ref_next = l4ref->idx;
     l4ref->idx = idx;
 
+    /* Fill the shadow page table entries. */
+    xpti_init_xen_l4(xd, l4pg);
+
     return idx;
 }
 
@@ -385,6 +400,26 @@ static unsigned xpti_shadow_activate(struct xpti_domain *xd, unsigned long mfn)
     l4pg->active_cnt++;
 
     return idx;
+}
+
+void xpti_update_l4(const struct domain *d, unsigned long mfn, unsigned slot,
+                    l4_pgentry_t e)
+{
+    struct xpti_domain *xd = d->arch.pv_domain.xpti;
+    unsigned long flags;
+    unsigned idx;
+    l4_pgentry_t *l4;
+
+    spin_lock_irqsave(&xd->lock, flags);
+
+    idx = xpti_shadow_from_hashlist(xd, mfn);
+    if ( idx != L4_INVALID )
+    {
+        l4 = mfn_to_virt(xd->l4pg[idx].xen_mfn);
+        l4[slot] = e;
+    }
+
+    spin_unlock_irqrestore(&xd->lock, flags);
 }
 
 void xpti_make_cr3(struct vcpu *v, unsigned long mfn)
