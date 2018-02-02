@@ -344,8 +344,8 @@ int free_page_type(struct page_info *page, unsigned long type,
 void init_xen_pae_l2_slots(l2_pgentry_t *l2t, const struct domain *d);
 void init_xen_l4_slots(l4_pgentry_t *l4t, mfn_t l4mfn,
                        const struct domain *d, mfn_t sl4mfn, bool ro_mpt);
-bool fill_ro_mpt(mfn_t mfn);
-void zap_ro_mpt(mfn_t mfn);
+bool fill_ro_mpt(const struct domain *d, mfn_t mfn);
+void zap_ro_mpt(const struct domain *d, mfn_t mfn);
 
 bool is_iomem_page(mfn_t mfn);
 

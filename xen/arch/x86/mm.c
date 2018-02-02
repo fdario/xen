@@ -1611,7 +1611,7 @@ void init_xen_l4_slots(l4_pgentry_t *l4t, mfn_t l4mfn,
     }
 }
 
-bool fill_ro_mpt(mfn_t mfn)
+bool fill_ro_mpt(const struct domain *d, mfn_t mfn)
 {
     l4_pgentry_t *l4tab = map_domain_page(mfn);
     bool ret = false;
@@ -1627,7 +1627,7 @@ bool fill_ro_mpt(mfn_t mfn)
     return ret;
 }
 
-void zap_ro_mpt(mfn_t mfn)
+void zap_ro_mpt(const struct domain *d, mfn_t mfn)
 {
     l4_pgentry_t *l4tab = map_domain_page(mfn);
 
@@ -2837,7 +2837,7 @@ int new_guest_cr3(mfn_t mfn)
     pv_destroy_ldt(curr); /* Unconditional TLB flush later. */
 
     if ( !VM_ASSIST(d, m2p_strict) && !paging_mode_refcounts(d) )
-        fill_ro_mpt(mfn);
+        fill_ro_mpt(d, mfn);
     curr->arch.guest_table = pagetable_from_mfn(mfn);
     update_cr3(curr);
 
@@ -3216,7 +3216,7 @@ long do_mmuext_op(
                 }
 
                 if ( VM_ASSIST(currd, m2p_strict) )
-                    zap_ro_mpt(_mfn(op.arg1.mfn));
+                    zap_ro_mpt(currd, _mfn(op.arg1.mfn));
             }
 
             curr->arch.guest_table_user = pagetable_from_pfn(op.arg1.mfn);
