@@ -425,19 +425,26 @@ void xpti_update_l4(const struct domain *d, unsigned long mfn, unsigned slot,
 void xpti_make_cr3(struct vcpu *v, unsigned long mfn)
 {
     struct xpti_domain *xd = v->domain->arch.pv_domain.xpti;
+    struct cpu_info *cpu_info;
     unsigned long flags;
-    unsigned idx;
+    unsigned old, new;
+
+    cpu_info = (struct cpu_info *)v->arch.pv_vcpu.stack_regs;
 
     spin_lock_irqsave(&xd->lock, flags);
 
-    idx = v->arch.pv_vcpu.xen_cr3_shadow;
+    old = v->arch.pv_vcpu.xen_cr3_shadow;
 
     /* First activate new shadow. */
-    v->arch.pv_vcpu.xen_cr3_shadow = xpti_shadow_activate(xd, mfn);
+    new = xpti_shadow_activate(xd, mfn);
+    v->arch.pv_vcpu.xen_cr3_shadow = new;
 
     /* Deactivate old shadow if applicable. */
-    if ( idx != L4_INVALID )
-        xpti_shadow_deactivate(xd, idx);
+    if ( old != L4_INVALID )
+        xpti_shadow_deactivate(xd, old);
+
+    cpu_info->xen_cr3 = mfn << PAGE_SHIFT;
+    cpu_info->guest_cr3 = xd->l4pg[new].xen_mfn << PAGE_SHIFT;
 
     spin_unlock_irqrestore(&xd->lock, flags);
 }

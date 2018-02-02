@@ -141,6 +141,8 @@ void __dummy__(void)
     OFFSET(CPUINFO_shadow_spec_ctrl, struct cpu_info, shadow_spec_ctrl);
     OFFSET(CPUINFO_use_shadow_spec_ctrl, struct cpu_info, use_shadow_spec_ctrl);
     OFFSET(CPUINFO_bti_ist_info, struct cpu_info, bti_ist_info);
+    OFFSET(CPUINFO_guest_cr3, struct cpu_info, guest_cr3);
+    OFFSET(CPUINFO_xen_cr3, struct cpu_info, xen_cr3);
     OFFSET(CPUINFO_stack_bottom_cpu, struct cpu_info, stack_bottom_cpu);
     OFFSET(CPUINFO_flags, struct cpu_info, flags);
     DEFINE(CPUINFO_sizeof, sizeof(struct cpu_info));

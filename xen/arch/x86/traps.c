@@ -305,9 +305,10 @@ static void show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs)
     if ( v != current )
     {
         struct vcpu *vcpu;
+        unsigned long cr3 = read_cr3();
 
         ASSERT(guest_kernel_mode(v, regs));
-        vcpu = maddr_get_owner(read_cr3()) == v->domain ? v : NULL;
+        vcpu = maddr_get_owner(cr3) == v->domain ? v : NULL;
         if ( !vcpu )
         {
             stack = do_page_walk(v, (unsigned long)stack);

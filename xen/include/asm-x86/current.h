@@ -69,7 +69,9 @@ struct cpu_info {
         };
         /* per vcpu mapping (xpti) */
         struct {
-            unsigned long v_pad[4];
+            unsigned long v_pad[2];
+            unsigned long guest_cr3;
+            unsigned long xen_cr3;
             unsigned long stack_bottom_cpu;
         };
     };

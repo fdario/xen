@@ -141,6 +141,8 @@ void ret_from_intr(void);
         GET_STACK_END(ax);                                               \
         testb $ON_VCPUSTACK, STACK_CPUINFO_FIELD(flags)(%rax);           \
         jz    1f;                                                        \
+        movq  STACK_CPUINFO_FIELD(xen_cr3)(%rax), %rcx;                  \
+        movq  %rcx, %cr3;                                                \
         movq  STACK_CPUINFO_FIELD(stack_bottom_cpu)(%rax), %rsp;         \
 1:
 
@@ -148,12 +150,25 @@ void ret_from_intr(void);
         GET_STACK_END(ax);                                               \
         testb $ON_VCPUSTACK, STACK_CPUINFO_FIELD(flags)(%rax);           \
         jz    1f;                                                        \
+        movq  STACK_CPUINFO_FIELD(xen_cr3)(%rax), %rcx;                  \
+        movq  %rcx, %cr3;                                                \
         sub   $(STACK_SIZE - 1 - ist * PAGE_SIZE), %rax;                 \
         mov   %rax, %rsp;                                                \
 1:
 
 #define SWITCH_TO_VCPU_STACK                                             \
-        mov   %r12, %rsp
+        mov   %r12, %rsp;                                                \
+        GET_STACK_END(ax);                                               \
+        testb $ON_VCPUSTACK, STACK_CPUINFO_FIELD(flags)(%rax);           \
+        jz    1f;                                                        \
+        mov   %cr4, %r8;                                                 \
+        mov   %r8, %r9;                                                  \
+        and   $~X86_CR4_PGE, %r8;                                        \
+        mov   %r8, %cr4;                                                 \
+        movq  STACK_CPUINFO_FIELD(guest_cr3)(%rax), %rcx;                \
+        movq  %rcx, %cr3;                                                \
+        mov   %r9, %cr4;                                                 \
+1:
 
 #ifndef NDEBUG
 #define ASSERT_NOT_IN_ATOMIC                                             \
