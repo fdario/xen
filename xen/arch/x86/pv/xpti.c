@@ -19,13 +19,16 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/cpu.h>
 #include <xen/domain_page.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/keyhandler.h>
 #include <xen/lib.h>
+#include <xen/notifier.h>
 #include <xen/sched.h>
 #include <asm/bitops.h>
+#include <asm/pv/mm.h>
 
 /*
  * For each L4 page table of the guest we need a shadow for the hypervisor.
@@ -104,6 +107,7 @@ struct xpti_domain {
     unsigned unused_first;     /* List of unused slots */
     spinlock_t lock;           /* Protects all shadow lists */
     struct domain *domain;
+    struct page_info *l3_shadow;
     struct tasklet tasklet;
 #ifdef XPTI_DEBUG
     unsigned cnt_alloc;
@@ -124,6 +128,9 @@ static __read_mostly enum {
     XPTI_OFF,
     XPTI_NODOM0
 } opt_xpti = XPTI_DEFAULT;
+
+static bool xpti_l3_shadow = false;
+static l3_pgentry_t *xpti_l3_shadows[11];
 
 static int parse_xpti(const char *s)
 {
@@ -342,6 +349,34 @@ static unsigned xpti_shadow_getforce(struct xpti_domain *xd)
     return idx;
 }
 
+static void xpti_update_l4_entry(struct xpti_domain *xd, l4_pgentry_t *dest,
+                                 l4_pgentry_t entry, unsigned slot)
+{
+    l3_pgentry_t *l3pg;
+
+    switch ( slot )
+    {
+    case 257: /* ioremap area. */
+    case 258: /* linear page table (guest table). */
+    case 259: /* linear page table (shadow table). */
+        dest[slot] = l4e_empty();
+        break;
+    case 260: /* per-domain mappings. */
+        dest[slot] = l4e_from_page(xd->l3_shadow, __PAGE_HYPERVISOR);
+        break;
+    case 261 ... 271: /* hypervisor text and data, direct phys mapping. */
+        l3pg = xpti_l3_shadows[slot - 261];
+        dest[slot] = l3pg
+                     ? l4e_from_mfn(_mfn(virt_to_mfn(l3pg)), __PAGE_HYPERVISOR)
+                     : l4e_empty();
+        break;
+    case 256: /* read-only guest accessible m2p table. */
+    default:
+        dest[slot] = entry;
+        break;
+    }
+}
+
 static void xpti_init_xen_l4(struct xpti_domain *xd, struct xpti_l4pg *l4pg)
 {
     unsigned i;
@@ -350,7 +385,7 @@ static void xpti_init_xen_l4(struct xpti_domain *xd, struct xpti_l4pg *l4pg)
     src = map_domain_page(_mfn(l4pg->guest_mfn));
     dest = mfn_to_virt(l4pg->xen_mfn);
     for ( i = 0; i < L4_PAGETABLE_ENTRIES; i++ )
-        dest[i] = src[i];
+        xpti_update_l4_entry(xd, dest, src[i], i);
     unmap_domain_page(src);
 }
 
@@ -416,7 +451,7 @@ void xpti_update_l4(const struct domain *d, unsigned long mfn, unsigned slot,
     if ( idx != L4_INVALID )
     {
         l4 = mfn_to_virt(xd->l4pg[idx].xen_mfn);
-        l4[slot] = e;
+        xpti_update_l4_entry(xd, l4, e, slot);
     }
 
     spin_unlock_irqrestore(&xd->lock, flags);
@@ -534,6 +569,8 @@ void xpti_domain_destroy(struct domain *d)
         free_xenheap_page(xpti_shadow_free(xd, idx));
     }
 
+    if ( xd->l3_shadow )
+        free_domheap_page(xd->l3_shadow);
     xfree(xd->l4pg);
     xfree(xd->l4ref);
     xfree(xd);
@@ -646,6 +683,125 @@ static int xpti_vcpu_init(struct vcpu *v)
     return rc;
 }
 
+static int xpti_add_mapping(unsigned long addr)
+{
+    unsigned int slot, flags, mapflags;
+    unsigned long mfn;
+    l3_pgentry_t *pl3e;
+    l2_pgentry_t *pl2e;
+    l1_pgentry_t *pl1e;
+
+    slot = l4_table_offset(addr);
+    pl3e = l4e_to_l3e(idle_pg_table[slot]);
+
+    slot = l3_table_offset(addr);
+    mapflags = l3e_get_flags(pl3e[slot]);
+    ASSERT(mapflags & _PAGE_PRESENT);
+    if ( mapflags & _PAGE_PSE )
+    {
+        mapflags &= ~_PAGE_PSE;
+        mfn = l3e_get_pfn(pl3e[slot]) & ~((1UL << (2 * PAGETABLE_ORDER)) - 1);
+        mfn |= PFN_DOWN(addr) & ((1UL << (2 * PAGETABLE_ORDER)) - 1);
+    }
+    else
+    {
+        pl2e = l3e_to_l2e(pl3e[slot]);
+        slot = l2_table_offset(addr);
+        mapflags = l2e_get_flags(pl2e[slot]);
+        ASSERT(mapflags & _PAGE_PRESENT);
+        if ( mapflags & _PAGE_PSE )
+        {
+            mapflags &= ~_PAGE_PSE;
+            mfn = l2e_get_pfn(pl2e[slot]) & ~((1UL << PAGETABLE_ORDER) - 1);
+            mfn |= PFN_DOWN(addr) & ((1UL << PAGETABLE_ORDER) - 1);
+        }
+        else
+        {
+            pl1e = l2e_to_l1e(pl2e[slot]);
+            slot = l1_table_offset(addr);
+            mapflags = l1e_get_flags(pl1e[slot]);
+            ASSERT(mapflags & _PAGE_PRESENT);
+            mfn = l1e_get_pfn(pl1e[slot]);
+        }
+    }
+
+    slot = l4_table_offset(addr);
+    ASSERT(slot >= 261 && slot <= 271);
+    pl3e = xpti_l3_shadows[slot - 261];
+    if ( !pl3e )
+    {
+        pl3e = alloc_xen_pagetable();
+        if ( !pl3e )
+            return -ENOMEM;
+        clear_page(pl3e);
+        xpti_l3_shadows[slot - 261] = pl3e;
+    }
+
+    slot = l3_table_offset(addr);
+    flags = l3e_get_flags(pl3e[slot]);
+    if ( !(flags & _PAGE_PRESENT) )
+    {
+        pl2e = alloc_xen_pagetable();
+        if ( !pl2e )
+            return -ENOMEM;
+        clear_page(pl2e);
+        pl3e[slot] = l3e_from_mfn(_mfn(virt_to_mfn(pl2e)), __PAGE_HYPERVISOR);
+    }
+    else
+    {
+        pl2e = l3e_to_l2e(pl3e[slot]);
+    }
+
+    slot = l2_table_offset(addr);
+    flags = l2e_get_flags(pl2e[slot]);
+    if ( !(flags & _PAGE_PRESENT) )
+    {
+        pl1e = alloc_xen_pagetable();
+        if ( !pl1e )
+            return -ENOMEM;
+        clear_page(pl1e);
+        pl2e[slot] = l2e_from_mfn(_mfn(virt_to_mfn(pl1e)), __PAGE_HYPERVISOR);
+    }
+    else
+    {
+        pl1e = l2e_to_l1e(pl2e[slot]);
+    }
+
+    slot = l1_table_offset(addr);
+    pl1e[slot] = l1e_from_mfn(_mfn(mfn), mapflags);
+
+    return 0;
+}
+
+static void xpti_rm_mapping(unsigned long addr)
+{
+    unsigned int slot, flags;
+    l3_pgentry_t *pl3e;
+    l2_pgentry_t *pl2e;
+    l1_pgentry_t *pl1e;
+
+    slot = l4_table_offset(addr);
+    ASSERT(slot >= 261 && slot <= 271);
+    pl3e = xpti_l3_shadows[slot - 261];
+    if ( !pl3e )
+        return;
+
+    slot = l3_table_offset(addr);
+    flags = l3e_get_flags(pl3e[slot]);
+    if ( !(flags & _PAGE_PRESENT) )
+        return;
+
+    pl2e = l3e_to_l2e(pl3e[slot]);
+    slot = l2_table_offset(addr);
+    flags = l2e_get_flags(pl2e[slot]);
+    if ( !(flags & _PAGE_PRESENT) )
+        return;
+
+    pl1e = l2e_to_l1e(pl2e[slot]);
+    slot = l1_table_offset(addr);
+    pl1e[slot] = l1e_empty();
+}
+
 int xpti_domain_init(struct domain *d)
 {
     bool xpti = false;
@@ -653,7 +809,9 @@ int xpti_domain_init(struct domain *d)
     struct vcpu *v;
     struct xpti_domain *xd;
     void *virt;
+    unsigned long addr;
     unsigned i, new;
+    l3_pgentry_t *l3tab, *l3shadow;
 
     if ( !is_pv_domain(d) || is_pv_32bit_domain(d) )
         return 0;
@@ -686,6 +844,27 @@ int xpti_domain_init(struct domain *d)
     xd->lru_first = L4_INVALID;
     xd->lru_last = L4_INVALID;
     xd->free_first = L4_INVALID;
+
+    if ( !xpti_l3_shadow )
+    {
+        xpti_l3_shadow = true;
+
+        for_each_online_cpu ( i )
+            if ( xpti_add_mapping((unsigned long)idt_tables[i]) )
+                goto done;
+
+        for ( addr = round_pgdown((unsigned long)&xpti_map_start);
+              addr <= round_pgdown((unsigned long)&xpti_map_end - 1);
+              addr += PAGE_SIZE )
+            if ( xpti_add_mapping(addr) )
+                goto done;
+
+        for ( addr = round_pgdown((unsigned long)&xpti_map_start_compat);
+              addr <= round_pgdown((unsigned long)&xpti_map_end_compat - 1);
+              addr += PAGE_SIZE )
+            if ( xpti_add_mapping(addr) )
+                goto done;
+    }
 
     spin_lock_init(&xd->lock);
     tasklet_init(&xd->tasklet, xpti_tasklet, (unsigned long)xd);
@@ -724,6 +903,16 @@ int xpti_domain_init(struct domain *d)
             goto done;
     }
 
+    xd->l3_shadow = alloc_domheap_page(d, MEMF_no_owner);
+    if ( !xd->l3_shadow )
+        goto done;
+    l3tab = __map_domain_page(d->arch.perdomain_l3_pg);
+    l3shadow = __map_domain_page(xd->l3_shadow);
+    clear_page(l3shadow);
+    l3shadow[0] = l3tab[0];          /* GDT/LDT shadow mapping. */
+    l3shadow[3] = l3tab[3];          /* XPTI mappings. */
+    unmap_domain_page(l3shadow);
+    unmap_domain_page(l3tab);
     ret = 0;
 
     printk("Enabling Xen Pagetable protection (XPTI) for Domain %d\n",
@@ -800,3 +989,39 @@ static int __init xpti_key_init(void)
     return 0;
 }
 __initcall(xpti_key_init);
+
+static int xpti_cpu_callback(struct notifier_block *nfb, unsigned long action,
+                             void *hcpu)
+{
+    unsigned int cpu = (unsigned long)hcpu;
+    int rc = 0;
+
+    if ( !xpti_l3_shadow )
+        return NOTIFY_DONE;
+
+    switch ( action )
+    {
+    case CPU_DOWN_FAILED:
+    case CPU_ONLINE:
+        rc = xpti_add_mapping((unsigned long)idt_tables[cpu]);
+        break;
+    case CPU_DOWN_PREPARE:
+        xpti_rm_mapping((unsigned long)idt_tables[cpu]);
+        break;
+    default:
+        break;
+    }
+
+    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+}
+
+static struct notifier_block xpti_cpu_nfb = {
+    .notifier_call = xpti_cpu_callback
+};
+
+static int __init xpti_presmp_init(void)
+{
+    register_cpu_notifier(&xpti_cpu_nfb);
+    return 0;
+}
+presmp_initcall(xpti_presmp_init);

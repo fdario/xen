@@ -13,6 +13,8 @@
 #include <public/xen.h>
 #include <irq_vectors.h>
 
+ENTRY(xpti_map_start_compat)
+
 ENTRY(entry_int82)
         ASM_CLAC
         pushq $0
@@ -367,3 +369,5 @@ compat_crash_page_fault:
         jmp   .Lft14
 .previous
         _ASM_EXTABLE(.Lft14, .Lfx14)
+
+ENTRY(xpti_map_end_compat)

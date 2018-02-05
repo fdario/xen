@@ -23,6 +23,11 @@
 
 #ifdef CONFIG_PV
 
+extern void *xpti_map_start;
+extern void *xpti_map_end;
+extern void *xpti_map_start_compat;
+extern void *xpti_map_end_compat;
+
 int pv_ro_page_fault(unsigned long addr, struct cpu_user_regs *regs);
 
 long pv_set_gdt(struct vcpu *v, unsigned long *frames, unsigned int entries);

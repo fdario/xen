@@ -14,6 +14,8 @@
 #include <public/xen.h>
 #include <irq_vectors.h>
 
+ENTRY(xpti_map_start)
+
 /* %rbx: struct vcpu, %r12: user_regs */
 ENTRY(switch_to_kernel)
         leaq  VCPU_trap_bounce(%rbx),%rdx
@@ -734,6 +736,8 @@ ENTRY(enable_nmis)
 /* No op trap handler.  Required for kexec crash path. */
 GLOBAL(trap_nop)
         iretq
+
+ENTRY(xpti_map_end)
 
 /* Table of automatically generated entry points.  One per vector. */
         .section .init.rodata, "a", @progbits
