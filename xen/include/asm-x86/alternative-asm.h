@@ -17,6 +17,15 @@
     .byte \alt_len
 .endm
 
+/* As above, but to replace the entire range by suitable NOPs. */
+.macro altinstruction_nop start end feature
+    .long \start - .
+    .long \start - .
+    .word \feature
+    .byte \end - \start
+    .byte 0
+.endm
+
 .macro ALTERNATIVE oldinstr, newinstr, feature
 .Lold_start_\@:
     \oldinstr

@@ -135,8 +135,7 @@ ENTRY(compat_restore_all_guest)
         jne   1b
 .Lcr4_alt_end:
         .section .altinstructions, "a"
-        altinstruction_entry .Lcr4_orig, .Lcr4_orig, X86_FEATURE_ALWAYS, \
-                             (.Lcr4_orig_end - .Lcr4_orig), 0
+        altinstruction_nop .Lcr4_orig, .Lcr4_orig_end, X86_FEATURE_ALWAYS
         altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMEP, \
                              (.Lcr4_orig_end - .Lcr4_orig), \
                              (.Lcr4_alt_end - .Lcr4_alt)

@@ -193,24 +193,24 @@ void ret_from_intr(void);
 
 #ifdef __ASSEMBLY__
 #define ASM_AC(op)                                                     \
-        661: ASM_NOP3;                                                 \
+        661: ASM_NOP3; 660:;                                           \
         .pushsection .altinstr_replacement, "ax";                      \
         662: __ASM_##op;                                               \
         .popsection;                                                   \
         .pushsection .altinstructions, "a";                            \
-        altinstruction_entry 661b, 661b, X86_FEATURE_ALWAYS, 3, 0;     \
-        altinstruction_entry 661b, 662b, X86_FEATURE_XEN_SMAP, 3, 3;       \
+        altinstruction_nop 661b, 660b, X86_FEATURE_ALWAYS;             \
+        altinstruction_entry 661b, 662b, X86_FEATURE_XEN_SMAP, 3, 3;   \
         .popsection
 
 #define ASM_STAC ASM_AC(STAC)
 #define ASM_CLAC ASM_AC(CLAC)
 
 #define CR4_PV32_RESTORE                                           \
-        667: ASM_NOP5;                                             \
+        667: ASM_NOP5; 669:;                                       \
         .pushsection .altinstr_replacement, "ax";                  \
         668: call cr4_pv32_restore;                                \
         .section .altinstructions, "a";                            \
-        altinstruction_entry 667b, 667b, X86_FEATURE_ALWAYS, 5, 0; \
+        altinstruction_nop 667b, 669b, X86_FEATURE_ALWAYS;         \
         altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMEP, 5, 5;   \
         altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMAP, 5, 5;   \
         .popsection
