@@ -43,6 +43,7 @@ restore_all_guest:
         mov VCPUMSR_spec_ctrl_raw(%rdx), %r15d
 
         /* Copy guest mappings and switch to per-CPU root page table. */
+.Lrag_cr3_start:
         mov   VCPU_cr3(%rbx), %r9
         GET_STACK_END(dx)
         mov   STACK_CPUINFO_FIELD(pv_cr3)(%rdx), %rdi
@@ -50,7 +51,6 @@ restore_all_guest:
         movabs $DIRECTMAP_VIRT_START, %rcx
         mov   %rdi, %rax
         and   %rsi, %rdi
-        jz    .Lrag_keep_cr3
         and   %r9, %rsi
         add   %rcx, %rdi
         add   %rcx, %rsi
@@ -72,7 +72,8 @@ restore_all_guest:
         mov   %rdi, %cr4
         mov   %rax, %cr3
         mov   %rsi, %cr4
-.Lrag_keep_cr3:
+.Lrag_cr3_end:
+        ALTERNATIVE_NOP .Lrag_cr3_start, .Lrag_cr3_end, X86_FEATURE_NO_XPTI
 
         /* Restore stashed SPEC_CTRL value. */
         mov   %r15d, %eax
@@ -158,7 +159,7 @@ UNLIKELY_END(exit_cr3)
  * %ss must be saved into the space left by the trampoline.
  */
 ENTRY(lstar_enter)
-        /* sti could live here when we don't switch page tables below. */
+        ALTERNATIVE nop, sti, X86_FEATURE_NO_XPTI
         movq  8(%rsp),%rax /* Restore %rax. */
         movq  $FLAT_KERNEL_SS,8(%rsp)
         pushq %r11
@@ -172,6 +173,7 @@ ENTRY(lstar_enter)
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         GET_STACK_END(bx)
+.Llstar_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
         neg   %rcx
         jz    .Llstar_cr3_okay
@@ -181,6 +183,8 @@ ENTRY(lstar_enter)
         movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
 .Llstar_cr3_okay:
         sti
+.Llstar_cr3_end:
+        ALTERNATIVE_NOP .Llstar_cr3_start, .Llstar_cr3_end, X86_FEATURE_NO_XPTI
 
         movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
         testb $TF_kernel_mode,VCPU_thread_flags(%rbx)
@@ -263,7 +267,7 @@ process_trap:
         jmp  test_all_events
 
 ENTRY(sysenter_entry)
-        /* sti could live here when we don't switch page tables below. */
+        ALTERNATIVE nop, sti, X86_FEATURE_NO_XPTI
         pushq $FLAT_USER_SS
         pushq $0
         pushfq
@@ -279,6 +283,7 @@ GLOBAL(sysenter_eflags_saved)
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         GET_STACK_END(bx)
+.Lsyse_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
         neg   %rcx
         jz    .Lsyse_cr3_okay
@@ -288,6 +293,8 @@ GLOBAL(sysenter_eflags_saved)
         movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
 .Lsyse_cr3_okay:
         sti
+.Lsyse_cr3_end:
+        ALTERNATIVE_NOP .Lsyse_cr3_start, .Lsyse_cr3_end, X86_FEATURE_NO_XPTI
 
         movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
         cmpb  $0,VCPU_sysenter_disables_events(%rbx)
@@ -329,6 +336,7 @@ ENTRY(int80_direct_trap)
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         GET_STACK_END(bx)
+.Lint80_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
         neg   %rcx
         jz    .Lint80_cr3_okay
@@ -338,6 +346,8 @@ ENTRY(int80_direct_trap)
         movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
 .Lint80_cr3_okay:
         sti
+.Lint80_cr3_end:
+        ALTERNATIVE_NOP .Lint80_cr3_start, .Lint80_cr3_end, X86_FEATURE_NO_XPTI
 
         cmpb  $0,untrusted_msi(%rip)
 UNLIKELY_START(ne, msi_check)
@@ -508,6 +518,7 @@ ENTRY(common_interrupt)
         SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
+.Lintr_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
         mov   %rcx, %r15
         neg   %rcx
@@ -526,8 +537,13 @@ ENTRY(common_interrupt)
         CR4_PV32_RESTORE
         movq %rsp,%rdi
         callq do_IRQ
+.Lintr_cr3_restore:
         mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
+.Lintr_cr3_end:
         jmp ret_from_intr
+
+        ALTERNATIVE_NOP .Lintr_cr3_restore, .Lintr_cr3_end, X86_FEATURE_NO_XPTI
+        ALTERNATIVE_NOP .Lintr_cr3_start, .Lintr_cr3_okay, X86_FEATURE_NO_XPTI
 
 /* No special register assumptions. */
 ENTRY(ret_from_intr)
@@ -550,6 +566,7 @@ GLOBAL(handle_exception)
         SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
+.Lxcpt_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
         mov   %rcx, %r15
         neg   %rcx
@@ -630,7 +647,9 @@ handle_exception_saved:
         PERFC_INCR(exceptions, %rax, %rbx)
         mov   (%rdx, %rax, 8), %rdx
         INDIRECT_CALL %rdx
+.Lxcpt_cr3_restore1:
         mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
+.Lxcpt_cr3_end1:
         testb $3,UREGS_cs(%rsp)
         jz    restore_all_xen
         leaq  VCPU_trap_bounce(%rbx),%rdx
@@ -663,8 +682,16 @@ exception_with_ints_disabled:
         rep;  movsq                     # make room for ec/ev
 1:      movq  UREGS_error_code(%rsp),%rax # ec/ev
         movq  %rax,UREGS_kernel_sizeof(%rsp)
+.Lxcpt_cr3_restore2:
         mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
+.Lxcpt_cr3_end2:
         jmp   restore_all_xen           # return to fixup code
+
+        ALTERNATIVE_NOP .Lxcpt_cr3_restore1, .Lxcpt_cr3_end1, \
+                        X86_FEATURE_NO_XPTI
+        ALTERNATIVE_NOP .Lxcpt_cr3_restore2, .Lxcpt_cr3_end2, \
+                        X86_FEATURE_NO_XPTI
+        ALTERNATIVE_NOP .Lxcpt_cr3_start, .Lxcpt_cr3_okay, X86_FEATURE_NO_XPTI
 
 /* No special register assumptions. */
 FATAL_exception_with_ints_disabled:

@@ -26,7 +26,7 @@
 #include <asm/nmi.h>
 #include <xen/livepatch.h>
 
-#define MAX_PATCH_LEN (255-1)
+#define MAX_PATCH_LEN 255
 
 extern struct alt_instr __alt_instructions[], __alt_instructions_end[];
 

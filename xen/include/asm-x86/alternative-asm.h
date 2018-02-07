@@ -72,6 +72,12 @@
     .popsection
 .endm
 
+.macro ALTERNATIVE_NOP start, end, feature
+        .pushsection .altinstructions, "a", @progbits
+        altinstruction_nop \start, \end, \feature
+        .popsection
+.endm
+
 #endif /* __ASSEMBLY__ */
 #endif /* _ASM_X86_ALTERNATIVE_ASM_H_ */
 

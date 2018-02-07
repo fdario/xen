@@ -199,7 +199,7 @@ ENTRY(compat_post_handle_exception)
 
 /* See lstar_enter for entry register state. */
 ENTRY(cstar_enter)
-        /* sti could live here when we don't switch page tables below. */
+        ALTERNATIVE nop, sti, X86_FEATURE_NO_XPTI
         CR4_PV32_RESTORE
         movq  8(%rsp),%rax /* Restore %rax. */
         movq  $FLAT_KERNEL_SS,8(%rsp)
@@ -214,6 +214,7 @@ ENTRY(cstar_enter)
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
 
         GET_STACK_END(bx)
+.Lcstar_cr3_start:
         mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
         neg   %rcx
         jz    .Lcstar_cr3_okay
@@ -223,6 +224,8 @@ ENTRY(cstar_enter)
         movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
 .Lcstar_cr3_okay:
         sti
+.Lcstar_cr3_end:
+        ALTERNATIVE_NOP .Lcstar_cr3_start, .Lcstar_cr3_end, X86_FEATURE_NO_XPTI
 
         movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
         movq  VCPU_domain(%rbx),%rcx
