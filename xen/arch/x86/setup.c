@@ -1545,7 +1545,16 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     cr4_pv32_mask = mmu_cr4_features & XEN_CR4_PV32_BITS;
 
     if ( opt_xpti < 0 )
-        opt_xpti = boot_cpu_data.x86_vendor != X86_VENDOR_AMD;
+    {
+        uint64_t caps = 0;
+
+        if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
+            caps = ARCH_CAPABILITIES_RDCL_NO;
+        else if ( boot_cpu_has(X86_FEATURE_ARCH_CAPS) )
+            rdmsrl(MSR_ARCH_CAPABILITIES, caps);
+
+        opt_xpti = !(caps & ARCH_CAPABILITIES_RDCL_NO);
+    }
     if ( opt_xpti )
         setup_clear_cpu_cap(X86_FEATURE_NO_XPTI);
     else
