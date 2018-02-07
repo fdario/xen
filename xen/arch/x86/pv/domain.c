@@ -220,10 +220,22 @@ int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
     return rc;
 }
 
-static void _toggle_guest_pt(struct vcpu *v)
+static void _toggle_guest_pt(struct vcpu *v, bool force_cr3)
 {
+    ASSERT(!in_irq());
+
     v->arch.flags ^= TF_kernel_mode;
     update_cr3(v);
+
+    /*
+     * There's no need to load CR3 here when it is going to be loaded on the
+     * way out to guest mode again anyway, and when the page tables we're
+     * currently on are the kernel ones (whereas when switching to kernel
+     * mode we need to be able to write a bounce frame onto the kernel stack).
+     */
+    if ( !force_cr3 && !(v->arch.flags & TF_kernel_mode) )
+        return;
+
     /* Don't flush user global mappings from the TLB. Don't tick TLB clock. */
     asm volatile ( "mov %0, %%cr3" : : "r" (v->arch.cr3) : "memory" );
 
@@ -253,13 +265,13 @@ void toggle_guest_mode(struct vcpu *v)
     }
     asm volatile ( "swapgs" );
 
-    _toggle_guest_pt(v);
+    _toggle_guest_pt(v, cpu_has_no_xpti);
 }
 
 void toggle_guest_pt(struct vcpu *v)
 {
     if ( !is_pv_32bit_vcpu(v) )
-        _toggle_guest_pt(v);
+        _toggle_guest_pt(v, true);
 }
 
 /*
