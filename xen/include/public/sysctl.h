@@ -601,6 +601,9 @@ struct xen_sysctl_credit_schedule {
 #define XEN_SYSCTL_CSCHED_TSLICE_MIN 1
     unsigned tslice_ms;
     unsigned ratelimit_us;
+    /* How long to consider a vCPU cache-hot on the CPU where it is running */
+#define XEN_SYSCTL_CSCHED_MGR_DLY_MAX (100 * 1000) /* 100us, in millisecs */
+    unsigned vcpu_migr_delay_us;
 };
 
 struct xen_sysctl_credit2_schedule {
