@@ -218,6 +218,44 @@
  */
 
 /*
+ * Hyperthreading (SMT) support.
+ *
+ * We use a special per-runq mask (smt_idle) and update it according to the
+ * following logic:
+ *  - when _all_ the SMT sibling in a core are idle, all their corresponding
+ *    bits are set in the smt_idle mask;
+ *  - when even _just_one_ of the SMT siblings in a core is not idle, all the
+ *    bits correspondings to it and to all its siblings are clear in the
+ *    smt_idle mask.
+ *
+ * Once we have such a mask, it is easy to implement a policy that, either:
+ *  - uses fully idle cores first: it is enough to try to schedule the vcpus
+ *    on pcpus from smt_idle mask first. This is what happens if
+ *    sched_smt_power_savings was not set at boot (default), and it maximizes
+ *    true parallelism, and hence performance;
+ *  - uses already busy cores first: it is enough to try to schedule the vcpus
+ *    on pcpus that are idle, but are not in smt_idle. This is what happens if
+ *    sched_smt_power_savings is set at boot, and it allows as more cores as
+ *    possible to stay in low power states, minimizing power consumption.
+ *
+ * This logic is entirely implemented in runq_tickle(), and that is enough.
+ * In fact, in this scheduler, placement of a vcpu on one of the pcpus of a
+ * runq, _always_ happens by means of tickling:
+ *  - when a vcpu wakes up, it calls csched2_vcpu_wake(), which calls
+ *    runq_tickle();
+ *  - when a migration is initiated in schedule.c, we call csched2_cpu_pick(),
+ *    csched2_vcpu_migrate() (which calls migrate()) and csched2_vcpu_wake().
+ *    csched2_cpu_pick() looks for the least loaded runq and return just any
+ *    of its processors. Then, csched2_vcpu_migrate() just moves the vcpu to
+ *    the chosen runq, and it is again runq_tickle(), called by
+ *    csched2_vcpu_wake() that actually decides what pcpu to use within the
+ *    chosen runq;
+ *  - when a migration is initiated in sched_credit2.c, by calling  migrate()
+ *    directly, that again temporarily use a random pcpu from the new runq,
+ *    and then calls runq_tickle(), by itself.
+ */
+
+/*
  * Basic constants
  */
 /* Default weight: How much a new domain starts with. */
@@ -490,6 +528,20 @@ struct csched2_runqueue_data {
 };
 
 /*
+ * Note that rqd->smt_idle is different than rqd->idle. rqd->idle
+ * records pcpus that at are merely idle (i.e., at the moment do not
+ * have a vcpu running on them).  But you have to manually filter out
+ * which pcpus have been tickled in order to find cores that are not
+ * going to be busy soon.  Filtering out tickled cpus pairwise is a
+ * lot of extra pain; so for rqd->smt_idle, we explicitly make so that
+ * the bits of a pcpu are set only if all the threads on its core are
+ * both idle *and* untickled.
+ *
+ * This means changing the mask when either rqd->idle or rqd->tickled
+ * changes.
+ */
+
+/*
  * System-wide private data
  */
 struct csched2_private {
@@ -598,82 +650,6 @@ static inline struct csched2_runqueue_data *c2rqd(const struct scheduler *ops,
 static inline bool has_cap(const struct csched2_vcpu *svc)
 {
     return svc->budget != STIME_MAX;
-}
-
-/*
- * Hyperthreading (SMT) support.
- *
- * We use a special per-runq mask (smt_idle) and update it according to the
- * following logic:
- *  - when _all_ the SMT sibling in a core are idle, all their corresponding
- *    bits are set in the smt_idle mask;
- *  - when even _just_one_ of the SMT siblings in a core is not idle, all the
- *    bits correspondings to it and to all its siblings are clear in the
- *    smt_idle mask.
- *
- * Once we have such a mask, it is easy to implement a policy that, either:
- *  - uses fully idle cores first: it is enough to try to schedule the vcpus
- *    on pcpus from smt_idle mask first. This is what happens if
- *    sched_smt_power_savings was not set at boot (default), and it maximizes
- *    true parallelism, and hence performance;
- *  - uses already busy cores first: it is enough to try to schedule the vcpus
- *    on pcpus that are idle, but are not in smt_idle. This is what happens if
- *    sched_smt_power_savings is set at boot, and it allows as more cores as
- *    possible to stay in low power states, minimizing power consumption.
- *
- * This logic is entirely implemented in runq_tickle(), and that is enough.
- * In fact, in this scheduler, placement of a vcpu on one of the pcpus of a
- * runq, _always_ happens by means of tickling:
- *  - when a vcpu wakes up, it calls csched2_vcpu_wake(), which calls
- *    runq_tickle();
- *  - when a migration is initiated in schedule.c, we call csched2_cpu_pick(),
- *    csched2_vcpu_migrate() (which calls migrate()) and csched2_vcpu_wake().
- *    csched2_cpu_pick() looks for the least loaded runq and return just any
- *    of its processors. Then, csched2_vcpu_migrate() just moves the vcpu to
- *    the chosen runq, and it is again runq_tickle(), called by
- *    csched2_vcpu_wake() that actually decides what pcpu to use within the
- *    chosen runq;
- *  - when a migration is initiated in sched_credit2.c, by calling  migrate()
- *    directly, that again temporarily use a random pcpu from the new runq,
- *    and then calls runq_tickle(), by itself.
- */
-
-/*
- * If all the siblings of cpu (including cpu itself) are both idle and
- * untickled, set all their bits in mask.
- *
- * NB that rqd->smt_idle is different than rqd->idle.  rqd->idle
- * records pcpus that at are merely idle (i.e., at the moment do not
- * have a vcpu running on them).  But you have to manually filter out
- * which pcpus have been tickled in order to find cores that are not
- * going to be busy soon.  Filtering out tickled cpus pairwise is a
- * lot of extra pain; so for rqd->smt_idle, we explicitly make so that
- * the bits of a pcpu are set only if all the threads on its core are
- * both idle *and* untickled.
- *
- * This means changing the mask when either rqd->idle or rqd->tickled
- * changes.
- */
-static inline
-void smt_idle_mask_set(unsigned int cpu, const cpumask_t *idlers,
-                       cpumask_t *mask)
-{
-    const cpumask_t *cpu_siblings = per_cpu(cpu_sibling_mask, cpu);
-
-    if ( cpumask_subset(cpu_siblings, idlers) )
-        cpumask_or(mask, mask, cpu_siblings);
-}
-
-/*
- * Clear the bits of all the siblings of cpu from mask (if necessary).
- */
-static inline
-void smt_idle_mask_clear(unsigned int cpu, cpumask_t *mask)
-{
-    const cpumask_t *cpu_siblings = per_cpu(cpu_sibling_mask, cpu);
-
-    if ( cpumask_subset(cpu_siblings, mask) )
-        cpumask_andnot(mask, mask, per_cpu(cpu_sibling_mask, cpu));
 }
 
 /*

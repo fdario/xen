@@ -894,7 +894,42 @@ static inline bool is_vcpu_online(const struct vcpu *v)
     return !test_bit(_VPF_down, &v->pause_flags);
 }
 
+/*
+ *  - sched_smt_power_savings=1, means maximum true parallelism. The schedulers
+ *    should try to schedule vcpus on pcpus belonging to cores on which all
+ *    the threads are currently;
+ *  - sched_dmt_power_savings=0, means minimum power consumption. The schedulers
+ *    should try to schedule vcpus on pcpus belonging to cores on which one
+ *    or more threads are currently busy, as this allows for as many cores as
+ *    possible to stay in low power states.
+ */
 extern bool sched_smt_power_savings;
+
+/*
+ * If all the siblings of cpu (including cpu itself) are idle, set
+ * their bits in mask.
+ */
+static inline
+void smt_idle_mask_set(unsigned int cpu, const cpumask_t *idlers,
+                       cpumask_t *mask)
+{
+    const cpumask_t *cpu_siblings = per_cpu(cpu_sibling_mask, cpu);
+
+    if ( cpumask_subset(cpu_siblings, idlers) )
+        cpumask_or(mask, mask, cpu_siblings);
+}
+
+/*
+ * Clear the bits of all the siblings of cpu from mask (if necessary).
+ */
+static inline
+void smt_idle_mask_clear(unsigned int cpu, cpumask_t *mask)
+{
+    const cpumask_t *cpu_siblings = per_cpu(cpu_sibling_mask, cpu);
+
+    if ( cpumask_subset(cpu_siblings, mask) )
+        cpumask_andnot(mask, mask, per_cpu(cpu_sibling_mask, cpu));
+}
 
 extern enum cpufreq_controller {
     FREQCTL_none, FREQCTL_dom0_kernel, FREQCTL_xen
