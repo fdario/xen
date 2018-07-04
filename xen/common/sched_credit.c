@@ -207,7 +207,8 @@ struct csched_private {
     /* lock for the whole pluggable scheduler, nests inside cpupool_lock */
     spinlock_t lock;
 
-    cpumask_var_t idlers;
+    spinlock_t smt_idle_lock;
+    cpumask_var_t idlers, smt_idle;
     cpumask_var_t cpus;
     uint32_t *balance_bias;
     uint32_t runq_sort;
@@ -240,6 +241,23 @@ static inline struct csched_vcpu *
 __runq_elem(struct list_head *elem)
 {
     return list_entry(elem, struct csched_vcpu, runq_elem);
+}
+
+/* smt_idle_mask_* are not atomic, so we need our own serialization here. */
+static inline void
+csched_smt_idle_mask_set(unsigned int cpu, struct csched_private *prv)
+{
+    spin_lock(&prv->smt_idle_lock);
+    smt_idle_mask_set(cpu, prv->idlers, prv->smt_idle);
+    spin_unlock(&prv->smt_idle_lock);
+}
+
+static inline void
+csched_smt_idle_mask_clear(unsigned int cpu, struct csched_private *prv)
+{
+    spin_lock(&prv->smt_idle_lock);
+    smt_idle_mask_clear(cpu, prv->smt_idle);
+    spin_unlock(&prv->smt_idle_lock);
 }
 
 /* Is the first element of cpu's runq (if any) cpu's idle vcpu? */
@@ -487,7 +505,13 @@ static inline void __runq_tickle(struct csched_vcpu *new)
          * true, the loop does only one step, and only one bit is cleared.
          */
         for_each_cpu(cpu, &mask)
-            cpumask_clear_cpu(cpu, prv->idlers);
+        {
+            if ( cpumask_test_cpu(cpu, prv->idlers) )
+            {
+                cpumask_clear_cpu(cpu, prv->idlers);
+                csched_smt_idle_mask_clear(cpu, prv);
+            }
+        }
         cpumask_raise_softirq(&mask, SCHEDULE_SOFTIRQ);
     }
     else
@@ -534,6 +558,7 @@ csched_deinit_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     prv->credit -= prv->credits_per_tslice;
     prv->ncpus--;
     cpumask_clear_cpu(cpu, prv->idlers);
+    cpumask_clear_cpu(cpu, prv->smt_idle);
     cpumask_clear_cpu(cpu, prv->cpus);
     if ( (prv->master == cpu) && (prv->ncpus > 0) )
     {
@@ -598,6 +623,7 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     /* Start off idling... */
     BUG_ON(!is_idle_vcpu(curr_on_cpu(cpu)));
     cpumask_set_cpu(cpu, prv->idlers);
+    cpumask_set_cpu(cpu, prv->smt_idle);
     spc->nr_runnable = 0;
 }
 
@@ -989,6 +1015,8 @@ csched_vcpu_acct(struct csched_private *prv, unsigned int cpu)
              */
             ASSERT(!cpumask_test_cpu(cpu,
                                      CSCHED_PRIV(per_cpu(scheduler, cpu))->idlers));
+            ASSERT(!cpumask_test_cpu(cpu,
+                                     CSCHED_PRIV(per_cpu(scheduler, cpu))->smt_idle));
             cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
         }
     }
@@ -1095,6 +1123,7 @@ csched_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
          * so the bit must be zero already.
          */
         ASSERT(!cpumask_test_cpu(cpu, CSCHED_PRIV(per_cpu(scheduler, cpu))->idlers));
+        ASSERT(!cpumask_test_cpu(cpu, CSCHED_PRIV(per_cpu(scheduler, cpu))->smt_idle));
         cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
     }
     else if ( __vcpu_on_runq(svc) )
@@ -1961,11 +1990,15 @@ csched_schedule(
     if ( !tasklet_work_scheduled && snext->pri == CSCHED_PRI_IDLE )
     {
         if ( !cpumask_test_cpu(cpu, prv->idlers) )
+        {
             cpumask_set_cpu(cpu, prv->idlers);
+            csched_smt_idle_mask_set(cpu, prv);
+        }
     }
     else if ( cpumask_test_cpu(cpu, prv->idlers) )
     {
         cpumask_clear_cpu(cpu, prv->idlers);
+        csched_smt_idle_mask_clear(cpu, prv);
     }
 
     if ( !is_idle_vcpu(snext->vcpu) )
@@ -2079,7 +2112,7 @@ csched_dump(const struct scheduler *ops)
 
     spin_lock_irqsave(&prv->lock, flags);
 
-#define idlers_buf keyhandler_scratch
+#define cpustr keyhandler_scratch
 
     printk("info:\n"
            "\tncpus              = %u\n"
@@ -2107,8 +2140,10 @@ csched_dump(const struct scheduler *ops)
            prv->ticks_per_tslice,
            prv->vcpu_migr_delay/ MICROSECS(1));
 
-    cpumask_scnprintf(idlers_buf, sizeof(idlers_buf), prv->idlers);
-    printk("idlers: %s\n", idlers_buf);
+    cpumask_scnprintf(cpustr, sizeof(cpustr), prv->idlers);
+    printk("idlers: %s\n", cpustr);
+    cpumask_scnprintf(cpustr, sizeof(cpustr), prv->smt_idle);
+    printk("fully idle cores: %s\n", cpustr);
 
     printk("active vcpus:\n");
     loop = 0;
@@ -2131,7 +2166,7 @@ csched_dump(const struct scheduler *ops)
             vcpu_schedule_unlock(lock, svc->vcpu);
         }
     }
-#undef idlers_buf
+#undef cpustr
 
     spin_unlock_irqrestore(&prv->lock, flags);
 }
@@ -2183,9 +2218,11 @@ csched_init(struct scheduler *ops)
     }
 
     if ( !zalloc_cpumask_var(&prv->cpus) ||
-         !zalloc_cpumask_var(&prv->idlers) )
+         !zalloc_cpumask_var(&prv->idlers) ||
+         !zalloc_cpumask_var(&prv->smt_idle) )
     {
         free_cpumask_var(prv->cpus);
+        free_cpumask_var(prv->idlers);
         xfree(prv->balance_bias);
         xfree(prv);
         return -ENOMEM;
@@ -2193,6 +2230,7 @@ csched_init(struct scheduler *ops)
 
     ops->sched_data = prv;
     spin_lock_init(&prv->lock);
+    spin_lock_init(&prv->smt_idle_lock);
     INIT_LIST_HEAD(&prv->active_sdom);
     prv->master = UINT_MAX;
 
@@ -2219,6 +2257,7 @@ csched_deinit(struct scheduler *ops)
         ops->sched_data = NULL;
         free_cpumask_var(prv->cpus);
         free_cpumask_var(prv->idlers);
+        free_cpumask_var(prv->smt_idle);
         xfree(prv->balance_bias);
         xfree(prv);
     }
