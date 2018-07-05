@@ -271,7 +271,7 @@ dec_nr_runnable(unsigned int cpu)
 }
 
 static inline void
-__runq_insert(struct csched_vcpu *svc)
+runq_insert(struct csched_vcpu *svc)
 {
     unsigned int cpu = svc->vcpu->processor;
     const struct list_head * const runq = RUNQ(cpu);
@@ -299,27 +299,18 @@ __runq_insert(struct csched_vcpu *svc)
     }
 
     list_add_tail(&svc->runq_elem, iter);
-}
 
-static inline void
-runq_insert(struct csched_vcpu *svc)
-{
-    __runq_insert(svc);
-    inc_nr_runnable(svc->vcpu->processor);
-}
-
-static inline void
-__runq_remove(struct csched_vcpu *svc)
-{
-    BUG_ON( !__vcpu_on_runq(svc) );
-    list_del_init(&svc->runq_elem);
+    if ( !is_idle_vcpu(svc->vcpu) )
+        inc_nr_runnable(svc->vcpu->processor);
 }
 
 static inline void
 runq_remove(struct csched_vcpu *svc)
 {
-    dec_nr_runnable(svc->vcpu->processor);
-    __runq_remove(svc);
+    BUG_ON( !__vcpu_on_runq(svc) );
+    if ( !is_idle_vcpu(svc->vcpu) )
+        dec_nr_runnable(svc->vcpu->processor);
+    list_del_init(&svc->runq_elem);
 }
 
 static void burn_credits(struct csched_vcpu *svc, s_time_t now)
@@ -1666,12 +1657,6 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
             WARN_ON(vc->is_urgent);
             runq_remove(speer);
             vc->processor = cpu;
-            /*
-             * speer will start executing directly on cpu, without having to
-             * go through runq_insert(). So we must update the runnable count
-             * for cpu here.
-             */
-            inc_nr_runnable(cpu);
             return speer;
         }
     }
@@ -1741,8 +1726,8 @@ csched_load_balance(struct csched_private *prv, int cpu,
                 spinlock_t *lock;
 
                 /*
-                 * If there is only one runnable vCPU on peer_cpu, it means
-                 * there's no one to be stolen in its runqueue, so skip it.
+                 * If there are no runnable vCPUs in peer_cpu's runq, it means
+                 * there's nothing to steal, so skip it.
                  *
                  * Checking this without holding the lock is racy... But that's
                  * the whole point of this optimization!
@@ -1766,7 +1751,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
                  *     optimization), it the pCPU would schedule right after we
                  *     have taken the lock, and hence block on it.
                  */
-                if ( CSCHED_PCPU(peer_cpu)->nr_runnable <= 1 )
+                if ( CSCHED_PCPU(peer_cpu)->nr_runnable == 0 )
                 {
                     TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* skipp'n */ 0);
                     goto next_cpu;
@@ -1820,7 +1805,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
 
  out:
     /* Failed to find more important work elsewhere... */
-    __runq_remove(snext);
+    runq_remove(snext);
     return snext;
 }
 
@@ -1937,12 +1922,10 @@ csched_schedule(
      * Select next runnable local VCPU (ie top of local runq)
      */
     if ( vcpu_runnable(current) )
-        __runq_insert(scurr);
+        runq_insert(scurr);
     else
     {
         BUG_ON( is_idle_vcpu(current) || list_empty(runq) );
-        /* Current has blocked. Update the runnable counter for this cpu. */
-        dec_nr_runnable(cpu);
     }
 
     snext = __runq_elem(runq->next);
@@ -1970,7 +1953,7 @@ csched_schedule(
      * already removed from the runq.
      */
     if ( snext->pri > CSCHED_PRI_TS_OVER )
-        __runq_remove(snext);
+        runq_remove(snext);
     else
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
 
@@ -2060,7 +2043,7 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     runq = &spc->runq;
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk("CPU[%02d] nr_run=%d, sort=%d, sibling=%s, ",
+    printk("CPU[%02d] nr_runbl=%d, sort=%d, sibling=%s, ",
            cpu, spc->nr_runnable, spc->runq_sort_last, cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
     printk("core=%s\n", cpustr);
