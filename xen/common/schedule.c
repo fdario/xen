@@ -49,6 +49,13 @@ string_param("sched", opt_sched);
 bool_t sched_smt_power_savings = 0;
 boolean_param("sched_smt_power_savings", sched_smt_power_savings);
 
+/*
+ * If enabled, only vcpus of the same domain will be scheduled on siblings
+ * hyperthread of the same core.
+ */
+bool sched_smt_cosched = 0;
+boolean_param("sched_smt_cosched", sched_smt_cosched);
+
 /* Default scheduling rate limit: 1ms
  * The behavior when sched_ratelimit_us is greater than sched_credit_tslice_ms is undefined
  * */

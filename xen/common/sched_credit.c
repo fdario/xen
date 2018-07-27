@@ -155,7 +155,18 @@ struct csched_pcpu {
 
     unsigned int tick;
     struct timer ticker;
+    struct csched_core *core;
 };
+
+/* For dealing with threads in the same cores */
+struct csched_core {
+    spinlock_t lock;
+    cpumask_t cpus, idlers;
+    struct csched_dom *sdom;
+    bool init_done;
+};
+
+static struct csched_core *cores;
 
 /*
  * Virtual CPU
@@ -605,6 +616,9 @@ csched_alloc_pdata(const struct scheduler *ops, int cpu)
 static void
 init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
 {
+    unsigned int i;
+    unsigned long flags;
+
     ASSERT(spin_is_locked(&prv->lock));
     /* cpu data needs to be allocated, but STILL uninitialized. */
     ASSERT(spc && spc->runq.next == NULL && spc->runq.prev == NULL);
@@ -630,6 +644,50 @@ init_pdata(struct csched_private *prv, struct csched_pcpu *spc, int cpu)
     INIT_LIST_HEAD(&spc->runq);
     spc->runq_sort_last = prv->runq_sort;
     spc->idle_bias = nr_cpu_ids - 1;
+
+    for ( i = 0; i < nr_cpu_ids; i++ )
+    {
+        /*
+         * We do this _only_ the first time that this pcpu is assigned to
+         * an instance of the Credit scheduler. This is ok, as, no matter
+         * to what cpupool and scheduler instance the CPU is then moved,
+         * topology does not change.
+         */
+        if ( !cores[i].init_done )
+        {
+            /*
+             * The absolute first time we run the loop, we initialize cores[0],
+             * we put the CPU in it, and break out.
+             */
+            spin_lock_init(&cores[i].lock);
+            ASSERT(cores[i].sdom == NULL);
+            printk("activating core %d for cpu %d\n", i, cpu);
+            cpumask_set_cpu(cpu, &cores[i].cpus);
+            cpumask_set_cpu(cpu, &cores[i].idlers);
+            spc->core = &cores[i];
+            cores[i].init_done = true;
+            break;
+        }
+
+        /*
+         * If we are here, at least one element of the cores array has been
+         * initialized, and one CPU has "been put" in it. Check if this CPU
+         * is a sibling, and should refer to that element too. If not, stay
+         * in the loop; at some point we'll find a non initialised element
+         * and use it.
+         */
+        ASSERT(!cpumask_empty(&cores[i].cpus));
+        if ( cpumask_test_cpu(cpu, per_cpu(cpu_sibling_mask, cpumask_first(&cores[i].cpus))) )
+        {
+            printk("putting cpu %d in core %d\n", cpu, i);
+            spin_lock_irqsave(&cores[i].lock, flags);
+            cpumask_set_cpu(cpu, &cores[i].cpus);
+            cpumask_set_cpu(cpu, &cores[i].idlers);
+            spin_unlock_irqrestore(&cores[i].lock, flags);
+            spc->core = &cores[i];
+            break;
+        }
+    }
 
     /* Start off idling... */
     BUG_ON(!is_idle_vcpu(curr_on_cpu(cpu)));
@@ -1857,6 +1915,7 @@ csched_schedule(
     const int cpu = smp_processor_id();
     struct list_head * const runq = RUNQ(cpu);
     struct csched_vcpu * const scurr = CSCHED_VCPU(current);
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
     struct csched_private *prv = CSCHED_PRIV(ops);
     struct csched_vcpu *snext;
     struct task_slice ret = { .migrated = 0 };
@@ -1988,6 +2047,8 @@ csched_schedule(
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
 
  out:
+    spin_lock(&spc->core->lock);
+
     /*
      * Update idlers mask if necessary. When we're idling, other CPUs
      * will tickle us when they get extra work.
@@ -1999,12 +2060,26 @@ csched_schedule(
             cpumask_set_cpu(cpu, prv->idlers);
             csched_smt_idle_mask_set(cpu, prv);
         }
+        cpumask_set_cpu(cpu, &spc->core->idlers);
+        if ( cpumask_equal(per_cpu(cpu_sibling_mask, cpu), &spc->core->idlers) )
+            spc->core->sdom = NULL;
     }
-    else if ( cpumask_test_cpu(cpu, prv->idlers) )
+    else
     {
-        cpumask_clear_cpu(cpu, prv->idlers);
-        csched_smt_idle_mask_clear(cpu, prv);
+        if ( cpumask_test_cpu(cpu, prv->idlers) )
+        {
+            cpumask_clear_cpu(cpu, prv->idlers);
+            csched_smt_idle_mask_clear(cpu, prv);
+        }
+
+        if ( !tasklet_work_scheduled )
+        {
+            cpumask_clear_cpu(cpu, &spc->core->idlers);
+            spc->core->sdom = snext->sdom;
+        }
     }
+
+    spin_unlock(&spc->core->lock);
 
     if ( !is_idle_vcpu(snext->vcpu) )
         snext->start_time += now;
@@ -2085,8 +2160,20 @@ csched_dump_pcpu(const struct scheduler *ops, int cpu)
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
     printk("CPU[%02d] nr_runbl=%d, sort=%d, sibling=%s, ",
            cpu, spc->nr_runnable, spc->runq_sort_last, cpustr);
+    cpumask_scnprintf(cpustr, sizeof(cpustr), &spc->core->idlers);
+    printk("idle_sibling=%s, ", cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
-    printk("core=%s\n", cpustr);
+    printk("core=%s", cpustr);
+    ASSERT(spc->core->init_done);
+    ASSERT(cpumask_equal(per_cpu(cpu_sibling_mask, cpu), &spc->core->cpus));
+    if ( sched_smt_cosched )
+    {
+        if ( spc->core->sdom )
+            printk(", sdom=d%d", spc->core->sdom->dom->domain_id);
+        else
+           printk(", sdom=/");
+    }
+    printk("\n");
 
     /* current VCPU (nothing to say if that's the idle vcpu). */
     svc = CSCHED_VCPU(curr_on_cpu(cpu));
@@ -2219,6 +2306,14 @@ csched_init(struct scheduler *ops)
     prv = xzalloc(struct csched_private);
     if ( prv == NULL )
         return -ENOMEM;
+
+    /* Allocate all core structures, and mark them as un-initialized */
+    cores = xzalloc_array(struct csched_core, nr_cpu_ids);
+    if ( !cores )
+    {
+        xfree(prv);
+        return -ENOMEM;
+    }
 
     prv->balance_bias = xzalloc_array(uint32_t, MAX_NUMNODES);
     if ( prv->balance_bias == NULL )

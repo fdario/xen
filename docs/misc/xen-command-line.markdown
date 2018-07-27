@@ -1692,6 +1692,17 @@ amount of time that a vcpu can be scheduled for before preempting it,
 in microseconds.  The default is 1000us (1ms).  Setting this to 0
 disables it altogether.
 
+### sched\_smt\_cosched
+> `= <boolean>`
+
+If true, forces the scheduler to run, at any given point in time, only
+vCPUs that belongs to one domain (or nothing!) on the various pCPUs
+that belong to one physical core (the so colled SMT-siblings, or
+SMT-hyperthreads, or just hyperthreads).
+
+This feature is referred to as SMT domain co-scheduling, or SMT
+co-scheduling or even just co-scheduling.
+
 ### sched\_smt\_power\_savings
 > `= <boolean>`
 

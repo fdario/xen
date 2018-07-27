@@ -906,6 +906,13 @@ static inline bool is_vcpu_online(const struct vcpu *v)
 extern bool sched_smt_power_savings;
 
 /*
+ * sched_smt_cosched = 1, vcpus which are not from the same domain, will
+ * never be scheduled and run, at the same time, on two sibling hyperthreads
+ * of the same core.
+ */
+extern bool sched_smt_cosched;
+
+/*
  * If all the siblings of cpu (including cpu itself) are idle, set
  * their bits in mask.
  */
