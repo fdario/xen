@@ -7655,12 +7655,15 @@ void sched_process(struct pcpu_info *p)
         case TRC_SCHED_CLASS_EVT(CSCHED, 11): /* STEAL_CHECK   */
             if(opt.dump_all) {
                 struct {
-                    unsigned int peer_cpu, check;
+                    unsigned int peer_cpu;
+                    int check;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched:load_balance %s %u\n",
-                       ri->dump_header, r->check ? "checking" : "skipping",
-                       r->peer_cpu);
+                printf(" %s csched:load_balance cpu %u: %s (nr_runnable=%d)\n",
+                       ri->dump_header, r->peer_cpu,
+                       r->check == 0 ? "skipping" :
+                           (r->check < 0 ? "locked" : "checking" ),
+                       r->check < 0 ? -r->check : r->check);
             }
             break;
         /* CREDIT 2 (TRC_CSCHED2_xxx) */

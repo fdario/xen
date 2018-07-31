@@ -1606,11 +1606,8 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
 
     ASSERT(peer_pcpu != NULL);
 
-    /*
-     * Don't steal from an idle CPU's runq because it's about to
-     * pick up work from it itself.
-     */
-    if ( unlikely(is_idle_vcpu(curr_on_cpu(peer_cpu))) )
+    /* Don't steal from pcpus which have no runnable vcpu queued. */
+    if ( unlikely(peer_pcpu->nr_runnable == 0) )
         goto out;
 
     list_for_each( iter, &peer_pcpu->runq )
@@ -1695,15 +1692,15 @@ csched_load_balance(struct csched_private *prv, int cpu,
 
     /*
      * Let's look around for work to steal, taking both hard affinity
-     * and soft affinity into account. More specifically, we check all
-     * the non-idle CPUs' runq, looking for:
+     * and soft affinity into account. More specifically, we check the
+     * CPUs' runq with runnable vCPUs, looking for:
      *  1. any "soft-affine work" to steal first,
      *  2. if not finding anything, any "hard-affine work" to steal.
      */
     for_each_affinity_balance_step( bstep )
     {
         /*
-         * We peek at the non-idling CPUs in a node-wise fashion. In fact,
+         * We peek at the CPUs in a node-wise fashion. In fact,
          * it is more likely that we find some affine work on our same
          * node, not to mention that migrating vcpus within the same node
          * could well expected to be cheaper than across-nodes (memory
@@ -1713,8 +1710,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
         do
         {
             /* Select the pCPUs in this node that have work we can steal. */
-            cpumask_andnot(&workers, online, prv->idlers);
-            cpumask_and(&workers, &workers, &node_to_cpumask(peer_node));
+            cpumask_and(&workers, online, &node_to_cpumask(peer_node));
             __cpumask_clear_cpu(cpu, &workers);
 
             first_cpu = cpumask_cycle(prv->balance_bias[peer_node], &workers);
@@ -1723,6 +1719,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
             peer_cpu = first_cpu;
             do
             {
+                const struct csched_pcpu * const pspc = CSCHED_PCPU(peer_cpu);
                 spinlock_t *lock;
 
                 /*
@@ -1735,9 +1732,9 @@ csched_load_balance(struct csched_private *prv, int cpu,
                  * In more details:
                  * - if we race with dec_nr_runnable(), we may try to take the
                  *   lock and call csched_runq_steal() for no reason. This is
-                 *   not a functional issue, and should be infrequent enough.
-                 *   And we can avoid that by re-checking nr_runnable after
-                 *   having grabbed the lock, if we want;
+                 *   not a functional issue and, in any case, we re-check
+                 *   nr_runnable inside csched_runq_steal, after grabbing the
+                 *   lock;
                  * - if we race with inc_nr_runnable(), we skip a pCPU that may
                  *   have runnable vCPUs in its runqueue, but that's not a
                  *   problem because:
@@ -1751,7 +1748,7 @@ csched_load_balance(struct csched_private *prv, int cpu,
                  *     optimization), it the pCPU would schedule right after we
                  *     have taken the lock, and hence block on it.
                  */
-                if ( CSCHED_PCPU(peer_cpu)->nr_runnable == 0 )
+                if ( pspc->nr_runnable == 0 )
                 {
                     TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* skipp'n */ 0);
                     goto next_cpu;
@@ -1769,11 +1766,11 @@ csched_load_balance(struct csched_private *prv, int cpu,
                 if ( !lock )
                 {
                     SCHED_STAT_CRANK(steal_trylock_failed);
-                    TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* skip */ 0);
+                    TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, -pspc->nr_runnable);
                     goto next_cpu;
                 }
 
-                TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, /* checked */ 1);
+                TRACE_2D(TRC_CSCHED_STEAL_CHECK, peer_cpu, pspc->nr_runnable);
 
                 /* Any work over there to steal? */
                 speer = cpumask_test_cpu(peer_cpu, online) ?
