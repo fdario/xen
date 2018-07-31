@@ -1859,8 +1859,8 @@ csched_schedule(
     struct csched_vcpu * const scurr = CSCHED_VCPU(current);
     struct csched_private *prv = CSCHED_PRIV(ops);
     struct csched_vcpu *snext;
-    struct task_slice ret;
-    s_time_t runtime, tslice;
+    struct task_slice ret = { .migrated = 0 };
+    s_time_t runtime, tslice = prv->tslice;
 
     SCHED_STAT_CRANK(schedule);
     CSCHED_VCPU_CHECK(current);
@@ -1949,11 +1949,8 @@ csched_schedule(
             __trace_var(TRC_CSCHED_RATELIMIT, 1, sizeof(d),
                         (unsigned char *)&d);
         }
-
-        ret.migrated = 0;
-        goto out;
+        goto out_rlim;
     }
-    tslice = prv->tslice;
 
     /*
      * Select next runnable local VCPU (ie top of local runq)
@@ -1965,21 +1962,17 @@ csched_schedule(
         BUG_ON( is_idle_vcpu(current) || list_empty(runq) );
     }
 
-    snext = __runq_elem(runq->next);
-    ret.migrated = 0;
-
     /* Tasklet work (which runs in idle VCPU context) overrides all else. */
-    if ( tasklet_work_scheduled )
+    if ( unlikely(tasklet_work_scheduled) )
     {
         TRACE_0D(TRC_CSCHED_SCHED_TASKLET);
         snext = CSCHED_VCPU(idle_vcpu[cpu]);
         snext->pri = CSCHED_PRI_TS_BOOST;
+        runq_remove(snext);
+        goto out;
     }
 
-    /*
-     * Clear YIELD flag before scheduling out
-     */
-    clear_bit(CSCHED_FLAG_VCPU_YIELD, &scurr->flags);
+    snext = __runq_elem(runq->next);
 
     /*
      * SMP Load balance:
@@ -1994,6 +1987,7 @@ csched_schedule(
     else
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
 
+ out:
     /*
      * Update idlers mask if necessary. When we're idling, other CPUs
      * will tickle us when they get extra work.
@@ -2015,7 +2009,12 @@ csched_schedule(
     if ( !is_idle_vcpu(snext->vcpu) )
         snext->start_time += now;
 
-out:
+    /*
+     * Clear YIELD flag before scheduling out
+     */
+    clear_bit(CSCHED_FLAG_VCPU_YIELD, &scurr->flags);
+
+ out_rlim:
     /*
      * Return task to run next...
      */
