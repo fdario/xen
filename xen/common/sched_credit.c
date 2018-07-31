@@ -2021,6 +2021,8 @@ csched_schedule(
         BUG_ON( is_idle_vcpu(current) || list_empty(runq) );
     }
 
+    spin_lock(&spc->core->lock);
+
     /* Tasklet work (which runs in idle VCPU context) overrides all else. */
     if ( unlikely(tasklet_work_scheduled) )
     {
@@ -2031,7 +2033,56 @@ csched_schedule(
         goto out;
     }
 
+    /*
+     * If all other threads of our core are idle, let's pretend the whole core
+     * is. In fact, if that is the case, we are free to pick any vcpu from any
+     * domain. It is safe to do this, as we're holding the core lock.
+     */
+    cpumask_set_cpu(cpu, &spc->core->idlers);
+    if ( spc->core->sdom != NULL &&
+         cpumask_equal(&spc->core->cpus, &spc->core->idlers) )
+        spc->core->sdom = NULL;
+
     snext = __runq_elem(runq->next);
+
+    /*
+     * If domain co-scheduling is enabled, and a domain is running already
+     * on this core, we can only pick a vcpu from that domain. If that is
+     * not the case of snext, look if there is any in our runq.
+     */
+    if ( sched_smt_cosched && spc->core->sdom != NULL &&
+         !is_idle_vcpu(snext->vcpu) && spc->core->sdom != snext->sdom )
+    {
+        struct list_head *iter;
+        struct csched_vcpu *siter;
+        int spri = snext->pri;
+
+        /* XXX: We checked what's already in snext twice. Avoid that! */
+        list_for_each( iter, runq )
+        {
+            siter = __runq_elem(iter);
+
+            /*
+             * Don't pick up a vcpu which has lower priority than snext, or
+             * we'd compromise fairness (if not risk starvation!).
+             */
+            if ( siter->pri < spri )
+            {
+                snext = CSCHED_VCPU(idle_vcpu[cpu]);
+                snext->pri = CSCHED_PRI_IDLE;
+                break;
+            }
+
+            /* Found a suitable candidate? */
+            if ( spc->core->sdom == siter->sdom )
+            {
+                snext = siter;
+                break;
+            }
+        }
+        ASSERT(is_idle_vcpu(snext->vcpu) ||
+               (snext->sdom == spc->core->sdom && snext->pri >= spri));
+    }
 
     /*
      * SMP Load balance:
@@ -2047,8 +2098,6 @@ csched_schedule(
         snext = csched_load_balance(prv, cpu, snext, &ret.migrated);
 
  out:
-    spin_lock(&spc->core->lock);
-
     /*
      * Update idlers mask if necessary. When we're idling, other CPUs
      * will tickle us when they get extra work.
@@ -2080,6 +2129,16 @@ csched_schedule(
     }
 
     spin_unlock(&spc->core->lock);
+
+    /*
+     * If we are leaving someone in the runq, give others pcpus the chance
+     * to try to come and pick it up.
+     */
+    if ( spc->nr_runnable != 0 )
+    {
+        ASSERT(!list_empty(runq) && !is_idle_vcpu(__runq_elem(runq->next)->vcpu));
+        __runq_tickle(__runq_elem(runq->next));
+    }
 
     if ( !is_idle_vcpu(snext->vcpu) )
         snext->start_time += now;
