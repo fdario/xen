@@ -372,6 +372,7 @@ static inline void __runq_tickle(struct csched_vcpu *new)
     unsigned int cpu = new->vcpu->processor;
     struct csched_vcpu * const cur = CSCHED_VCPU(curr_on_cpu(cpu));
     struct csched_private *prv = CSCHED_PRIV(per_cpu(scheduler, cpu));
+    struct csched_pcpu *spc = CSCHED_PCPU(cpu);
     cpumask_t mask, idle_mask, *online;
     int balance_step, idlers_empty;
 
@@ -396,9 +397,21 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                   cpumask_test_cpu(cpu, &idle_mask)) )
     {
         ASSERT(cpumask_cycle(cpu, new->vcpu->cpu_hard_affinity) == cpu);
-        SCHED_STAT_CRANK(tickled_idle_cpu_excl);
-        __cpumask_set_cpu(cpu, &mask);
-        goto tickle;
+        spin_lock(&spc->core->lock);
+        /*
+         * If SMT co-scheduling of domains is enabled, we can only tickle
+         * either fully idle cores, or cores where new's domain is running
+         * already in (some of) the other thread(s).
+         */
+        if ( !sched_smt_cosched ||
+             spc->core->sdom == NULL || new->sdom == spc->core->sdom )
+        {
+            spin_unlock(&spc->core->lock);
+            SCHED_STAT_CRANK(tickled_idle_cpu_excl);
+            __cpumask_set_cpu(cpu, &mask);
+            goto tickle;
+        }
+        spin_lock(&spc->core->lock);
     }
 
     /*
