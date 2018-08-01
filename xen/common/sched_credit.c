@@ -1705,6 +1705,7 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
 {
     const struct csched_private * const prv = CSCHED_PRIV(per_cpu(scheduler, cpu));
     const struct csched_pcpu * const peer_pcpu = CSCHED_PCPU(peer_cpu);
+    const struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
     struct csched_vcpu *speer;
     struct list_head *iter;
     struct vcpu *vc;
@@ -1722,9 +1723,26 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
         /*
          * If next available VCPU here is not of strictly higher
          * priority than ours, this PCPU is useless to us.
+         *
+         * On the other hand, with sched_smt_cosched enabled, we are ok with
+         * vcpus that have the same prio as our candidate, as far as they come
+         * from the same domain which is already running on this core.
          */
-        if ( speer->pri <= pri )
-            break;
+        if ( !sched_smt_cosched )
+        {
+            if ( speer->pri <= pri )
+                break;
+        }
+        else
+        {
+            /* XXX: This should be more 'compact' */
+            if ( is_idle_vcpu(speer->vcpu) )
+                break;
+            if ( speer->pri < pri )
+                break;
+            if ( speer->pri == pri && spc->core->sdom == NULL )
+                break;
+        }
 
         /* Is this VCPU runnable on our PCPU? */
         vc = speer->vcpu;
