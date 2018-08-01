@@ -416,8 +416,10 @@ static inline void __runq_tickle(struct csched_vcpu *new)
 
     /*
      * If there are no idlers, and the new vcpu is a higher priority than
-     * the old vcpu, run it here.
-    *
+     * the old vcpu, run it here. If SMT domain co-scheduling is enabled,
+     * though, we also must be already running another vcpu of the same domain
+     * on this core.
+     *
      * If there are idle cpus, first try to find one suitable to run
      * new, so we can avoid preempting cur.  If we cannot find a
      * suitable idler on which to run new, run it here, but try to
@@ -426,8 +428,13 @@ static inline void __runq_tickle(struct csched_vcpu *new)
     if ( idlers_empty && new->pri > cur->pri )
     {
         ASSERT(cpumask_test_cpu(cpu, new->vcpu->cpu_hard_affinity));
-        SCHED_STAT_CRANK(tickled_busy_cpu);
-        __cpumask_set_cpu(cpu, &mask);
+        spin_lock(&spc->core->lock);
+        if ( !sched_smt_cosched || new->sdom == spc->core->sdom )
+        {
+            SCHED_STAT_CRANK(tickled_busy_cpu);
+            __cpumask_set_cpu(cpu, &mask);
+        }
+        spin_unlock(&spc->core->lock);
     }
     else if ( !idlers_empty )
     {
@@ -473,6 +480,12 @@ static inline void __runq_tickle(struct csched_vcpu *new)
              * leave cur alone (as it is running and is, likely, cache-hot)
              * and wake some of them (which is waking up and so is, likely,
              * cache cold anyway), and go for one of them.
+             *
+             * TODO: for SMT domain co-scheduling, we must also be sure that
+             * these idlers are on core where new->domain is running already
+             * as they can't be on fully idle cores, or we would have found
+             * them in prv->smt_idle). That can be done with a loop, or
+             * introducing new data structures...
              */
             if ( !new_idlers_empty )
             {
@@ -483,12 +496,24 @@ static inline void __runq_tickle(struct csched_vcpu *new)
 
             /*
              * If there are no suitable idlers for new, and it's higher
-             * priority than cur, check whether we can migrate cur away.
-             * We have to do it indirectly, via _VPF_migrating (instead
-             * of just tickling any idler suitable for cur) because cur
-             * is running.
+             * priority than cur, an option is to run it here, and migrate cur
+             * away. If domain co-scheduling is enabled, we can do that only if
+             * the core is idle, or we're running new->domain already.
+             *
+             * TODO: Similarly, when checking whether we can migrate cur away,
+             * we should not only check if there are idlers suitable for cur,
+             * but also whether they are on fully idle cores, or on ones that
+             * are running cur->domain already. That can be done with a loop,
+             * or introducing a new data structure...
+             *
+             * If we decide to migrate cur, we have to do it indirectly, via
+             * _VPF_migrating (instead of just tickling any suitable idler),
+             * as cur is running.
              */
-            if ( new->pri > cur->pri )
+            spin_lock(&spc->core->lock);
+            if ( new->pri > cur->pri &&
+                 (!sched_smt_cosched || spc->core->sdom == NULL ||
+                  spc->core->sdom == new->sdom) )
             {
                 if ( cpumask_intersects(cur->vcpu->cpu_hard_affinity,
                                         &idle_mask) )
@@ -498,15 +523,32 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                     SCHED_STAT_CRANK(migrate_kicked_away);
                     set_bit(_VPF_migrating, &cur->vcpu->pause_flags);
                 }
+                spin_unlock(&spc->core->lock);
                 /* Tickle cpu anyway, to let new preempt cur. */
                 SCHED_STAT_CRANK(tickled_busy_cpu);
                 __cpumask_set_cpu(cpu, &mask);
                 goto tickle;
             }
+            spin_unlock(&spc->core->lock);
 
             /* We get here only if we didn't find anyone. */
             ASSERT(cpumask_empty(&mask));
         }
+    }
+
+    /* Don't tickle cpus that won't be able to pick up new. */
+    if ( sched_smt_cosched )
+    {
+        unsigned int c;
+
+        for_each_cpu(c, &mask)
+        {
+            spc = CSCHED_PCPU(c);
+            spin_lock(&spc->core->lock);
+            if ( spc->core->sdom != NULL && spc->core->sdom != new->sdom )
+                cpumask_clear_cpu(c, &mask);
+            spin_unlock(&spc->core->lock);
+         }
     }
 
     if ( !cpumask_empty(&mask) )
