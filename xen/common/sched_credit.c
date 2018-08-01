@@ -802,15 +802,26 @@ static inline int
 __csched_vcpu_is_migrateable(const struct csched_private *prv, struct vcpu *vc,
                              int dest_cpu, cpumask_t *mask)
 {
+    const struct csched_pcpu * const dspc = CSCHED_PCPU(dest_cpu);
+
     /*
-     * Don't pick up work that's hot on peer PCPU, or that can't (or
-     * would prefer not to) run on cpu.
-     *
      * The caller is supposed to have already checked that vc is also
      * not running.
      */
     ASSERT(!vc->is_running);
 
+    /*
+     * If dest_cpu is not idle (and domain co-scheduling is on), we can only
+     * pick a vcpu from the same domain it is already running there.
+     */
+    ASSERT(spin_is_locked(&dspc->core->lock));
+    if ( sched_smt_cosched && dspc->core->sdom != NULL && dspc->core->sdom->dom != vc->domain )
+            return 0;
+
+    /*
+     * Don't pick up work that's hot on peer PCPU, or that can't (or
+     * would prefer not to) run on cpu.
+     */
     return !__csched_vcpu_is_cache_hot(prv, vc) &&
            cpumask_test_cpu(dest_cpu, mask);
 }
