@@ -424,6 +424,15 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                                      cpumask_scratch_cpu(cpu));
             cpumask_and(cpumask_scratch_cpu(cpu),
                         cpumask_scratch_cpu(cpu), &idle_mask);
+
+            /* Let's check fully idle cores first. */
+            if ( cpumask_intersects(cpumask_scratch_cpu(cpu), prv->smt_idle) )
+            {
+                cpumask_and(&mask, cpumask_scratch_cpu(cpu), prv->smt_idle);
+                break;
+            }
+
+            /* Now, let's check all idlers. */
             new_idlers_empty = cpumask_empty(cpumask_scratch_cpu(cpu));
 
             /*
@@ -441,11 +450,6 @@ static inline void __runq_tickle(struct csched_vcpu *new)
              * We have to do it indirectly, via _VPF_migrating (instead
              * of just tickling any idler suitable for cur) because cur
              * is running.
-             *
-             * If there are suitable idlers for new, no matter priorities,
-             * leave cur alone (as it is running and is, likely, cache-hot)
-             * and wake some of them (which is waking up and so is, likely,
-             * cache cold anyway).
              */
             if ( new_idlers_empty && new->pri > cur->pri )
             {
@@ -460,23 +464,19 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                 /* Tickle cpu anyway, to let new preempt cur. */
                 SCHED_STAT_CRANK(tickled_busy_cpu);
                 __cpumask_set_cpu(cpu, &mask);
+                goto tickle;
             }
-            else if ( !new_idlers_empty )
+
+            /*
+             * If there are suitable idlers for new, no matter priorities,
+             * leave cur alone (as it is running and is, likely, cache-hot)
+             * and wake some of them (which is waking up and so is, likely,
+             * cache cold anyway).
+             */
+            if ( !new_idlers_empty )
             {
-                /* Which of the idlers suitable for new shall we wake up? */
                 SCHED_STAT_CRANK(tickled_idle_cpu);
-                if ( opt_tickle_one_idle )
-                {
-                    if ( cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu)) )
-                        this_cpu(last_tickle_cpu) = cpu;
-                    else
-                        this_cpu(last_tickle_cpu) =
-                            cpumask_cycle(this_cpu(last_tickle_cpu),
-                                          cpumask_scratch_cpu(cpu));
-                    __cpumask_set_cpu(this_cpu(last_tickle_cpu), &mask);
-                }
-                else
-                    cpumask_or(&mask, &mask, cpumask_scratch_cpu(cpu));
+                cpumask_or(&mask, &mask, cpumask_scratch_cpu(cpu));
             }
 
             /* Did we find anyone? */
@@ -485,9 +485,20 @@ static inline void __runq_tickle(struct csched_vcpu *new)
         }
     }
 
- tickle:
     if ( !cpumask_empty(&mask) )
     {
+        /* Which of the idlers suitable for new shall we wake up? */
+        if ( opt_tickle_one_idle )
+        {
+            if ( cpumask_test_cpu(cpu, &mask) )
+                this_cpu(last_tickle_cpu) = cpu;
+            else
+                this_cpu(last_tickle_cpu) =
+                    cpumask_cycle(this_cpu(last_tickle_cpu), &mask);
+            cpumask_copy(&mask, cpumask_of(this_cpu(last_tickle_cpu)));
+        }
+
+ tickle:
         if ( unlikely(tb_init_done) )
         {
             /* Avoid TRACE_*: saves checking !tb_init_done each step */
