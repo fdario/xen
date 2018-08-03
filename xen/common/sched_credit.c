@@ -413,7 +413,7 @@ static inline void __runq_tickle(struct csched_vcpu *new)
          */
         for_each_affinity_balance_step( balance_step )
         {
-            int new_idlers_empty;
+            bool new_idlers_empty;
 
             if ( balance_step == BALANCE_SOFT_AFFINITY
                  && !has_soft_affinity(new->vcpu) )
@@ -445,13 +445,26 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                 continue;
 
             /*
+             * If there are suitable idlers for new, no matter priorities,
+             * leave cur alone (as it is running and is, likely, cache-hot)
+             * and wake some of them (which is waking up and so is, likely,
+             * cache cold anyway), and go for one of them.
+             */
+            if ( !new_idlers_empty )
+            {
+                SCHED_STAT_CRANK(tickled_idle_cpu);
+                cpumask_or(&mask, &mask, cpumask_scratch_cpu(cpu));
+                break;
+            }
+
+            /*
              * If there are no suitable idlers for new, and it's higher
              * priority than cur, check whether we can migrate cur away.
              * We have to do it indirectly, via _VPF_migrating (instead
              * of just tickling any idler suitable for cur) because cur
              * is running.
              */
-            if ( new_idlers_empty && new->pri > cur->pri )
+            if ( new->pri > cur->pri )
             {
                 if ( cpumask_intersects(cur->vcpu->cpu_hard_affinity,
                                         &idle_mask) )
@@ -467,21 +480,8 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                 goto tickle;
             }
 
-            /*
-             * If there are suitable idlers for new, no matter priorities,
-             * leave cur alone (as it is running and is, likely, cache-hot)
-             * and wake some of them (which is waking up and so is, likely,
-             * cache cold anyway).
-             */
-            if ( !new_idlers_empty )
-            {
-                SCHED_STAT_CRANK(tickled_idle_cpu);
-                cpumask_or(&mask, &mask, cpumask_scratch_cpu(cpu));
-            }
-
-            /* Did we find anyone? */
-            if ( !cpumask_empty(&mask) )
-                break;
+            /* We get here only if we didn't find anyone. */
+            ASSERT(cpumask_empty(&mask));
         }
     }
 
