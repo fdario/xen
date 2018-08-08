@@ -136,6 +136,10 @@
 #define TRC_CSCHED_SCHEDULE      TRC_SCHED_CLASS_EVT(CSCHED, 9)
 #define TRC_CSCHED_RATELIMIT     TRC_SCHED_CLASS_EVT(CSCHED, 10)
 #define TRC_CSCHED_STEAL_CHECK   TRC_SCHED_CLASS_EVT(CSCHED, 11)
+#define TRC_CSCHED_RUNQ_NEXT     TRC_SCHED_CLASS_EVT(CSCHED, 12)
+#define TRC_CSCHED_COSCHED_DOM   TRC_SCHED_CLASS_EVT(CSCHED, 13)
+#define TRC_CSCHED_RUNQ_CHECK    TRC_SCHED_CLASS_EVT(CSCHED, 14)
+#define TRC_CSCHED_STEAL_DCHECK  TRC_SCHED_CLASS_EVT(CSCHED, 15)
 
 /*
  * Boot parameters
@@ -1785,6 +1789,8 @@ csched_runq_steal(int peer_cpu, int cpu, int pri, int balance_step)
     list_for_each( iter, &peer_pcpu->runq )
     {
         speer = __runq_elem(iter);
+        TRACE_3D(TRC_CSCHED_STEAL_DCHECK, speer->vcpu->domain->domain_id,
+                 speer->vcpu->vcpu_id, speer->pri);
 
         /*
          * If next available VCPU here is not of strictly higher
@@ -2024,10 +2030,17 @@ csched_schedule(
     {
         struct {
             unsigned cpu:16, tasklet:8, idle:8;
+            unsigned vcpu:16, dom:16;
+            int pri, cosc_dom;
         } d;
         d.cpu = cpu;
         d.tasklet = tasklet_work_scheduled;
         d.idle = is_idle_vcpu(current);
+        d.dom = scurr->vcpu->domain->domain_id;
+        d.vcpu = scurr->vcpu->vcpu_id;
+        d.pri = scurr->pri;
+        d.cosc_dom = !sched_smt_cosched || !spc->core->sdom ?
+                     -1 : spc->core->sdom->dom->domain_id;
         __trace_var(TRC_CSCHED_SCHEDULE, 1, sizeof(d),
                     (unsigned char *)&d);
     }
@@ -2135,6 +2148,8 @@ csched_schedule(
         spc->core->sdom = NULL;
 
     snext = __runq_elem(runq->next);
+    TRACE_3D(TRC_CSCHED_RUNQ_NEXT, snext->vcpu->domain->domain_id,
+             snext->vcpu->vcpu_id, snext->pri);
 
     /*
      * If domain co-scheduling is enabled, and a domain is running already
@@ -2152,6 +2167,8 @@ csched_schedule(
         list_for_each( iter, runq )
         {
             siter = __runq_elem(iter);
+            TRACE_3D(TRC_CSCHED_RUNQ_CHECK, siter->vcpu->domain->domain_id,
+                     siter->vcpu->vcpu_id, snext->pri);
 
             /*
              * Don't pick up a vcpu which has lower priority than snext, or
@@ -2218,6 +2235,9 @@ csched_schedule(
             spc->core->sdom = snext->sdom;
         }
     }
+
+    TRACE_1D(TRC_CSCHED_COSCHED_DOM, spc->core->sdom == NULL ?
+             -1 : spc->core->sdom->dom->domain_id);
 
     spin_unlock(&spc->core->lock);
 

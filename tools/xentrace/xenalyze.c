@@ -7417,6 +7417,18 @@ void dump_sched_vcpu_action(struct record_info *ri, const char *action)
     printf(" %s %s d%uv%u\n", ri->dump_header, action, r->domid, r->vcpuid);
 }
 
+static inline const char *csched_pri_to_string(int pri)
+{
+    switch(pri)
+    {
+        case   0: return "BOOST";
+        case  -1: return "UNDER";
+        case  -2: return "OVER";
+        case -64: return "IDLE";
+        default: return "";
+    }
+}
+
 void sched_process(struct pcpu_info *p)
 {
     struct record_info *ri = &p->ri;
@@ -7632,12 +7644,19 @@ void sched_process(struct pcpu_info *p)
             if(opt.dump_all) {
                 struct {
                     unsigned int cpu:16, tasklet:8, idle:8;
+                    unsigned int vcpuid:16, domid:16;
+                    int pri, cosc_dom;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched:schedule cpu %u%s%s\n",
+                printf(" %s csched:schedule cpu %u curr=d%uv%u prio=%s%s%s",
                        ri->dump_header, r->cpu,
-                       r->tasklet ? ", tasklet scheduled" : "",
-                       r->idle ? ", idle" : ", busy");
+                       r->domid, r->vcpuid, csched_pri_to_string(r->pri),
+                       r->idle ? ", (idle)" : ", (busy)",
+                       r->tasklet ? ", tasklet scheduled" : "");
+                if (r->cosc_dom != -1)
+                    printf(", cosched=d%d\n", r->cosc_dom);
+                else
+                    printf(", cosched=/\n");
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED, 10): /* RATELIMIT     */
@@ -7664,6 +7683,55 @@ void sched_process(struct pcpu_info *p)
                        r->check == 0 ? "skipping" :
                            (r->check < 0 ? "locked" : "checking" ),
                        r->check < 0 ? -r->check : r->check);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 12): /* RUNQ_NEXT     */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int domid, vcpuid;
+                    int pri;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:runq_next d%uv%u prio=%s\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       csched_pri_to_string(r->pri));
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 13): /* COSCHED_DOM   */
+            if(opt.dump_all) {
+                struct {
+                    int cosc_dom;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:smt_cosched_dom=", ri->dump_header);
+                if (r->cosc_dom != -1)
+                    printf("%d\n", r->cosc_dom);
+                else
+                    printf("/\n");
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 14): /* RUNQ_CHECK    */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int domid, vcpuid;
+                    int pri;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:runq_check d%uv%u prio=%s\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       csched_pri_to_string(r->pri));
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 15): /* STEAL_DCHECK  */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int domid, vcpuid;
+                    int pri;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:steal_dom_check d%uv%u prio=%s\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       csched_pri_to_string(r->pri));
             }
             break;
         /* CREDIT 2 (TRC_CSCHED2_xxx) */
