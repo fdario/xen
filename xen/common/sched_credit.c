@@ -373,21 +373,18 @@ static inline void __runq_tickle(struct csched_vcpu *new)
     }
 
     /*
-     * If the pcpu is idle, or there are no idlers and the new
-     * vcpu is a higher priority than the old vcpu, run it here.
-     *
+     * If there are no idlers, and the new vcpu is a higher priority than
+     * the old vcpu, run it here.
+    *
      * If there are idle cpus, first try to find one suitable to run
      * new, so we can avoid preempting cur.  If we cannot find a
      * suitable idler on which to run new, run it here, but try to
      * find a suitable idler on which to run cur instead.
      */
-    if ( cur->pri == CSCHED_PRI_IDLE
-         || (idlers_empty && new->pri > cur->pri) )
+    if ( idlers_empty && new->pri > cur->pri )
     {
-        if ( cur->pri != CSCHED_PRI_IDLE )
-            SCHED_STAT_CRANK(tickled_busy_cpu);
-        else
-            SCHED_STAT_CRANK(tickled_idle_cpu);
+        ASSERT(cpumask_test_cpu(cpu, new->vcpu->cpu_hard_affinity));
+        SCHED_STAT_CRANK(tickled_busy_cpu);
         __cpumask_set_cpu(cpu, &mask);
     }
     else if ( !idlers_empty )
@@ -452,9 +449,12 @@ static inline void __runq_tickle(struct csched_vcpu *new)
                 SCHED_STAT_CRANK(tickled_idle_cpu);
                 if ( opt_tickle_one_idle )
                 {
-                    this_cpu(last_tickle_cpu) =
-                        cpumask_cycle(this_cpu(last_tickle_cpu),
-                                      cpumask_scratch_cpu(cpu));
+                    if ( cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu)) )
+                        this_cpu(last_tickle_cpu) = cpu;
+                    else
+                        this_cpu(last_tickle_cpu) =
+                            cpumask_cycle(this_cpu(last_tickle_cpu),
+                                          cpumask_scratch_cpu(cpu));
                     __cpumask_set_cpu(this_cpu(last_tickle_cpu), &mask);
                 }
                 else
