@@ -172,6 +172,36 @@
  */
 
 /*
+ * Group scheduling:
+ *
+ * A group of physical cpus are said to be coscheduling a domain if only
+ * virtual cpus of that same domain are running on any of the cpus. If there
+ * are not enough (ready to run) vcpus from the domain, some of the pCPUs in
+ * the coscheduling group stay idle.
+ *
+ * So, basically, after we've divided the cpus in coscheduling groups, each
+ * group will run a domain at a time. For instance, the cpus of coscheduling
+ * group A, at any given time, either run the vcpus of a specific guest, or are
+ * idle.
+ *
+ * Typically, coscheduling group are formed after topology consideration, e.g.,
+ * the SMT topology. I.e., all the cpus that share a core live  in the same
+ * coscheduling group. This has started to go under the name of
+ * 'core-scheduling'.
+ *
+ * Enabling a group scheduling like behavior may, depending on a number of
+ * factors, bring benefits from a performance or security point of view.
+ * E.g., core-scheduling could be of help in limiting information leak through
+ * side channel attacks on some SMT systems.
+ *
+ * NB: the term 'gang scheduling' also exist and is used, sometimes as
+ * synonym of coscheduling and group scheduling. However, strictly speaking,
+ * what gang scheduling means is that a certain set of vcpus (typically the
+ * vcpus of a guest) either run together, each on one cpu, or they don't run
+ * at all. And we therefore do not use this term here.
+ */
+
+/*
  * Locking:
  *
  * - runqueue lock
@@ -184,6 +214,9 @@
  *  + protects runqueue-wide data in csched2_runqueue_data;
  *  + protects vcpu parameters in csched2_vcpu for the vcpu in the
  *    runqueue.
+ *  + protects group-scheduling wide data in csched2_grpsched_data. This
+ *    is because we force cpus that are in the same coscheduling group, to
+ *    also share the same runqueue.
  *
  * - Private scheduler lock
  *  + protects scheduler-wide data in csched2_private, such as:
@@ -475,6 +508,60 @@ static int __init parse_credit2_runqueue(const char *s)
 custom_param("credit2_runqueue", parse_credit2_runqueue);
 
 /*
+ * Group scheduling.
+ *
+ * We support flexible coscheduling grouping strategies, such as:
+ *
+ * - cpu: meaning no group scheduling happens (i.e., this is how group
+ *        scheduling is disabled);
+ *
+ * - core: pCPUs are grouped at the core-level. This means pCPUs that are
+ *         sibling hyperthreads within the same core, are made part of
+ *         the same group. Therefore, each core only executes one domain at
+ *         a time. The number of vCPUs of such domain running on each core
+ *         depends on how many threads the core itself has (typically 2, but
+ *         systems with 4 threads per-core exists already);
+ *
+ * - node: pCPUs are grouped at the NUMA nodes level. This means all the pCPUs
+ *         within a NUMA node, are made part of one group, and hence execute
+ *         the vCPUs of one domain at a time. On an SMT systems, this of course
+ *         means that all the threads of all the cores inside a node are in
+ *         the same group.
+ *
+ * Per-socket --which often is the same than per-node, but not always-- and
+ * even global group scheduling is certainly possible, but not currently
+ * implemented. Well, in theory it should "just work"^TM, but it hasn't been
+ * tested thoroughly, so let's not offer it to users.
+ *
+ * pCPUs that are part of the same group, must also share the runqueue.
+ */
+static int __read_mostly opt_grpsched = OPT_TOPOLOGY_CORE;
+
+static int __init parse_credit2_group_sched(const char *s)
+{
+    if ( !strcmp(s, "no") || !strcmp(s, "false") )
+    {
+        opt_grpsched = 0;
+        return 0;
+    }
+
+    opt_grpsched = parse_topology_span(s);
+
+    /* We're limiting group scheduling to socket granularity, for now. */
+    if ( opt_grpsched < 0 || opt_grpsched > OPT_TOPOLOGY_NODE )
+        return -EINVAL;
+
+    return 0;
+}
+custom_param("credit2_group_sched", parse_credit2_group_sched);
+
+/* Returns false if opt_grpsched is OPT_TOPOLOGY_CPU, which is 0 */
+static inline bool grpsched_enabled(void)
+{
+    return opt_grpsched;
+}
+
+/*
  * Per-runqueue data
  */
 struct csched2_runqueue_data {
@@ -499,6 +586,17 @@ struct csched2_runqueue_data {
 };
 
 /*
+ * Per-coscheduling group data
+ */
+struct csched2_grpsched_data {
+    /* No locking necessary, we use runqueue lock for serialization.         */
+    struct csched2_dom *sdom;  /* domain running on the cpus of the group    */
+    int id;                    /* ID of this group (-1 if invalid)           */
+    unsigned int nr_running;   /* vcpus currently running in this group      */
+    cpumask_t cpus;            /* cpus that are part of this group           */
+};
+
+/*
  * System-wide private data
  */
 struct csched2_private {
@@ -510,6 +608,7 @@ struct csched2_private {
 
     cpumask_t active_queues;           /* Runqueues with (maybe) active cpus */
     struct csched2_runqueue_data *rqd; /* Data of the various runqueues      */
+    struct csched2_grpsched_data *gscd;/* Data of the coscheduling groups    */
 
     cpumask_t initialized;             /* CPUs part of this scheduler        */
     struct list_head sdom;             /* List of domains (for debug key)    */
@@ -519,6 +618,7 @@ struct csched2_private {
  * Physical CPU
  */
 struct csched2_pcpu {
+    struct csched2_grpsched_data *gscd;
     int runq_id;
 };
 
@@ -605,6 +705,12 @@ static inline struct csched2_runqueue_data *c2rqd(const struct scheduler *ops,
                                                   unsigned int cpu)
 {
     return &csched2_priv(ops)->rqd[c2r(cpu)];
+}
+
+/* CPU to coscheduling group data */
+static inline struct csched2_grpsched_data *c2gscd(unsigned int cpu)
+{
+    return csched2_pcpu(cpu)->gscd;
 }
 
 /* Does the domain of this vCPU have a cap? */
@@ -1622,6 +1728,46 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     if ( unlikely(new->tickled_cpu != -1) )
         SCHED_STAT_CRANK(tickled_cpu_overwritten);
     new->tickled_cpu = ipid;
+}
+
+/*
+ * Group scheduling code.
+ */
+
+static unsigned int
+cpu_to_cosched_group(struct csched2_private *prv, unsigned int cpu)
+{
+    struct csched2_grpsched_data *gscd;
+    unsigned int peer_cpu, gsci;
+
+    ASSERT(opt_runqueue >= opt_grpsched);
+    ASSERT(opt_grpsched > 0 || opt_grpsched < OPT_TOPOLOGY_NODE);
+
+    for ( gsci = 0; gsci < nr_cpu_ids; gsci++ )
+    {
+        /* As soon as we come across an uninitialized group, use it. */
+        if ( prv->gscd[gsci].id == -1 )
+            break;
+
+        /*
+         * We've found an element of the gscd array which has been initialized,
+         * already, and hence has at least one CPU in it. Check if this CPU
+         * belongs there too.
+         */
+
+        gscd = prv->gscd + gsci;
+        BUG_ON(cpumask_empty(&gscd->cpus));
+        peer_cpu = cpumask_first(&gscd->cpus);
+
+        if ( (opt_grpsched == OPT_TOPOLOGY_CORE && same_core(peer_cpu, cpu)) ||
+             (opt_grpsched == OPT_TOPOLOGY_NODE && same_node(peer_cpu, cpu)) )
+            break;
+    }
+
+    /* We really expect that each cpu will be in a coscheduling group. */
+    BUG_ON(gsci >= nr_cpu_ids);
+
+    return gsci;
 }
 
 /*
@@ -3460,6 +3606,7 @@ csched2_schedule(
 {
     const int cpu = smp_processor_id();
     struct csched2_runqueue_data *rqd;
+    struct csched2_grpsched_data * const gscd = c2gscd(cpu);
     struct csched2_vcpu * const scurr = csched2_vcpu(current);
     struct csched2_vcpu *snext = NULL;
     unsigned int skipped_vcpus = 0;
@@ -3474,6 +3621,11 @@ csched2_schedule(
     rqd = c2rqd(ops, cpu);
     BUG_ON(!cpumask_test_cpu(cpu, &rqd->active));
 
+    /*
+     * We're holding the runqueue lock already. For group-scheduling data,
+     * cpus that are in the same group, also share the runqueue, so serializing
+     * them on the runqueue lock is enough, and no further locking is necessary.
+     */
     ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
 
     BUG_ON(!is_idle_vcpu(scurr->vcpu) && scurr->rqd != rqd);
@@ -3562,6 +3714,14 @@ csched2_schedule(
 
             runq_remove(snext);
             __set_bit(__CSFLAG_scheduled, &snext->flags);
+
+            /* Track which domain is running in the coscheduling group */
+            gscd->sdom = snext->sdom;
+            if ( is_idle_vcpu(scurr->vcpu) )
+            {
+                gscd->nr_running++;
+                ASSERT(gscd->nr_running <= cpumask_weight(&gscd->cpus));
+            }
         }
 
         /* Clear the idle mask if necessary */
@@ -3623,10 +3783,21 @@ csched2_schedule(
             cpumask_andnot(cpumask_scratch, &rqd->idle, &rqd->tickled);
             smt_idle_mask_set(cpu, cpumask_scratch, &rqd->smt_idle);
         }
+        if ( !is_idle_vcpu(scurr->vcpu) )
+        {
+            ASSERT(gscd->nr_running >= 1);
+            if ( --gscd->nr_running == 0 )
+            {
+                /* There's no domain running on this coscheduling group */
+                gscd->sdom = NULL;
+            }
+        }
         /* Make sure avgload gets updated periodically even
          * if there's no activity */
         update_load(ops, rqd, NULL, 0, now);
     }
+    ASSERT(gscd->sdom != NULL || gscd->nr_running == 0);
+    ASSERT(gscd->nr_running != 0 || gscd->sdom == NULL);
 
     /*
      * Return task to run next...
@@ -3667,7 +3838,8 @@ dump_pcpu(const struct scheduler *ops, int cpu)
 #define cpustr keyhandler_scratch
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk(" CPU[%02d] runq=%d, sibling=%s, ", cpu, c2r(cpu), cpustr);
+    printk(" %sCPU[%02d] runq=%d, sibling=%s, ", grpsched_enabled() ? " " : "",
+           cpu, c2r(cpu), cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
     printk("core=%s\n", cpustr);
 
@@ -3772,8 +3944,32 @@ csched2_dump(const struct scheduler *ops)
         printk("Runqueue %d:\n", rqd->id);
         printk("CPUs:\n");
 
-        for_each_cpu(j, &rqd->active)
-            dump_pcpu(ops, j);
+        cpumask_copy(cpumask_scratch, &rqd->active);
+        while ( !cpumask_empty(cpumask_scratch) )
+        {
+            int c = cpumask_first(cpumask_scratch);
+            struct csched2_grpsched_data * const cgscd = c2gscd(c);
+            cpumask_t *cpus;
+
+            if ( grpsched_enabled() )
+            {
+                cpus = &cgscd->cpus;
+                printk(" cosched_group=%d, ", cgscd->id);
+                if ( cgscd->sdom )
+                    printk("sdom=d%d, ", cgscd->sdom->dom->domain_id);
+                else
+                   printk("sdom=/, ");
+                printk("nr_running=%u\n", cgscd->nr_running);
+            }
+            else
+                cpus = cpumask_scratch;
+
+            for_each_cpu(j, cpus)
+            {
+                cpumask_clear_cpu(j, cpumask_scratch);
+                dump_pcpu(ops, j);
+            }
+        }
 
         printk("RUNQ:\n");
         list_for_each( iter, runq )
@@ -3814,11 +4010,13 @@ init_pdata(struct csched2_private *prv, struct csched2_pcpu *spc,
            unsigned int cpu)
 {
     struct csched2_runqueue_data *rqd;
+    struct csched2_grpsched_data *gscd;
+    unsigned int grpsched_id;
 
     ASSERT(rw_is_write_locked(&prv->lock));
     ASSERT(!cpumask_test_cpu(cpu, &prv->initialized));
     /* CPU data needs to be allocated, but still uninitialized. */
-    ASSERT(spc && spc->runq_id == -1);
+    ASSERT(spc && spc->runq_id == -1 && spc->gscd == NULL);
 
     /* Figure out which runqueue to put it in */
     spc->runq_id = cpu_to_runqueue(prv, cpu);
@@ -3831,7 +4029,7 @@ init_pdata(struct csched2_private *prv, struct csched2_pcpu *spc,
         printk(XENLOG_INFO " First cpu on runqueue, activating\n");
         activate_runqueue(prv, spc->runq_id);
     }
-    
+
     __cpumask_set_cpu(cpu, &rqd->idle);
     __cpumask_set_cpu(cpu, &rqd->active);
     __cpumask_set_cpu(cpu, &prv->initialized);
@@ -3839,6 +4037,27 @@ init_pdata(struct csched2_private *prv, struct csched2_pcpu *spc,
 
     if ( cpumask_weight(&rqd->active) == 1 )
         rqd->pick_bias = cpu;
+
+    /* Figure out in which coscheduling group this belongs */
+    if ( grpsched_enabled() )
+    {
+        grpsched_id = cpu_to_cosched_group(prv, cpu);
+
+        printk("Adding cpu %d to cosched. group %d\n", cpu, grpsched_id);
+        spc->gscd = gscd = &prv->gscd[grpsched_id];
+        if ( cpumask_empty(&gscd->cpus) )
+        {
+            printk("First cpu in group, activating\n");
+            ASSERT(gscd->sdom == NULL && gscd->nr_running == 0);
+            gscd->id = grpsched_id;
+        }
+        cpumask_set_cpu(cpu, &gscd->cpus);
+    }
+    else
+    {
+        spc->gscd = &prv->gscd[cpu];
+        cpumask_set_cpu(cpu, &prv->gscd[cpu].cpus);
+    }
 
     return spc->runq_id;
 }
@@ -4009,6 +4228,23 @@ csched2_global_init(void)
         opt_cap_period = 10; /* ms */
     }
 
+    if ( opt_grpsched > opt_runqueue )
+    {
+        printk("WARNING: %s: can't have %s group scheduling with per-%s runqueue\n",
+               __func__, opt_topospan_str[opt_grpsched],
+               opt_topospan_str[opt_runqueue]);
+        if ( opt_runqueue >= OPT_TOPOLOGY_CORE )
+        {
+            printk(" resorting to per-core group scheduling\n");
+            opt_grpsched = OPT_TOPOLOGY_CORE;
+        }
+        else
+        {
+            printk(" disabling group scheduling\n");
+            opt_grpsched = 0;
+        }
+    }
+
     return 0;
 }
 
@@ -4025,12 +4261,14 @@ csched2_init(struct scheduler *ops)
            XENLOG_INFO " underload_balance_tolerance: %d\n"
            XENLOG_INFO " overload_balance_tolerance: %d\n"
            XENLOG_INFO " runqueues arrangement: %s\n"
+           XENLOG_INFO " group scheduling: %s\n"
            XENLOG_INFO " cap enforcement granularity: %dms\n",
            opt_load_precision_shift,
            opt_load_window_shift,
            opt_underload_balance_tolerance,
            opt_overload_balance_tolerance,
            opt_topospan_str[opt_runqueue],
+           opt_grpsched ? opt_topospan_str[opt_grpsched] : "disabled",
            opt_cap_period);
 
     printk(XENLOG_INFO "load tracking window length %llu ns\n",
@@ -4050,15 +4288,25 @@ csched2_init(struct scheduler *ops)
     rwlock_init(&prv->lock);
     INIT_LIST_HEAD(&prv->sdom);
 
-    /* Allocate all runqueues and mark them as un-initialized */
+    /*
+     * Allocate all runqueues and coscheduling group data structures,
+     * and mark them all as un-initialized.
+     */
     prv->rqd = xzalloc_array(struct csched2_runqueue_data, nr_cpu_ids);
     if ( !prv->rqd )
     {
         xfree(prv);
         return -ENOMEM;
     }
+    prv->gscd = xzalloc_array(struct csched2_grpsched_data, nr_cpu_ids);
+    if ( !prv->gscd )
+    {
+        xfree(prv->rqd);
+        xfree(prv);
+        return -ENOMEM;
+    }
     for ( i = 0; i < nr_cpu_ids; i++ )
-        prv->rqd[i].id = -1;
+        prv->rqd[i].id = prv->gscd[i].id = -1;
 
     /* initialize ratelimit */
     prv->ratelimit_us = sched_ratelimit_us;
