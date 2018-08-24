@@ -3414,7 +3414,7 @@ csched2_runtime(const struct scheduler *ops, int cpu,
 /*
  * Find a candidate.
  */
-static struct csched2_vcpu *
+static noinline struct csched2_vcpu *
 runq_candidate(struct csched2_runqueue_data *rqd,
                struct csched2_vcpu *scurr,
                int cpu, s_time_t now,
@@ -3423,7 +3423,18 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     struct list_head *iter, *temp;
     struct csched2_vcpu *snext = NULL;
     struct csched2_private *prv = csched2_priv(per_cpu(scheduler, cpu));
+    struct csched2_grpsched_data *gscd = c2gscd(cpu);
     bool yield = false, soft_aff_preempt = false;
+
+    /*
+     * Some more sanity checking. With group scheduling enabled, either:
+     * - the whole coscheduling group is currently idle. Or,
+     * - this CPU is currently idle. Or,
+     * - this CPU is running a vcpu from the same domain of all the
+     *   other one that are running in the group (if any).
+     */
+    ASSERT(!grpsched_enabled() || gscd->sdom == NULL ||
+           scurr->sdom == NULL || gscd->sdom == scurr->sdom);
 
     *skipped = 0;
 
@@ -3472,6 +3483,8 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         if ( unlikely(!cpumask_test_cpu(cpu, cpumask_scratch)) )
         {
             cpumask_t *online = cpupool_domain_cpumask(scurr->vcpu->domain);
+
+            /* XXX deal with grpsched_enabled() == true */
 
             /* Ok, is any of the pcpus in scurr soft-affinity idle? */
             cpumask_and(cpumask_scratch, cpumask_scratch, &rqd->idle);
@@ -3524,6 +3537,23 @@ runq_candidate(struct csched2_runqueue_data *rqd,
         /* Only consider vcpus that are allowed to run on this processor. */
         if ( !cpumask_test_cpu(cpu, svc->vcpu->cpu_hard_affinity) )
         {
+            (*skipped)++;
+            continue;
+        }
+
+        /*
+         * If groups scheduling is enabled, only consider svc if:
+         * - the whole group is idle. Or,
+         * - one or more other svc->sdom's vcpus are running already in the
+         *   pCPUs of the coscheduling group. Or,
+         * - there is only one vcpu running in the whole coscheduling group,
+         *   and it is running here on this CPU (and svc would preempt it).
+         */
+        if ( grpsched_enabled() &&
+             gscd->sdom != NULL && gscd->sdom != svc->sdom &&
+             !(gscd->nr_running == 1 && scurr->sdom != NULL) )
+        {
+            ASSERT(gscd->nr_running != 0);
             (*skipped)++;
             continue;
         }
@@ -3714,6 +3744,18 @@ csched2_schedule(
 
             runq_remove(snext);
             __set_bit(__CSFLAG_scheduled, &snext->flags);
+
+            /*
+             * If group scheduling is enabled, and we're switching to
+             * a non-idle vcpu, either:
+             * - they're from the same domain,
+             * - the whole coscheduling group was idle,
+             * - there was only 1 vcpu running in the whole scheduling group,
+             *   and it was running on this CPU (i.e., this CPU was not idle).
+             */
+            ASSERT(!grpsched_enabled() || gscd->sdom == snext->sdom ||
+                   (gscd->nr_running == 0 && gscd->sdom == NULL) ||
+                   (gscd->nr_running == 1 && !is_idle_vcpu(scurr->vcpu)));
 
             /* Track which domain is running in the coscheduling group */
             gscd->sdom = snext->sdom;
