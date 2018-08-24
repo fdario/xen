@@ -1558,6 +1558,7 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     s_time_t max = 0;
     unsigned int bs, cpu = new->vcpu->processor;
     struct csched2_runqueue_data *rqd = c2rqd(ops, cpu);
+    struct csched2_grpsched_data *gscd = c2gscd(cpu);
     cpumask_t *online = cpupool_domain_cpumask(new->vcpu->domain);
     cpumask_t mask;
 
@@ -1593,10 +1594,19 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                   cpumask_test_cpu(cpu, &rqd->idle) &&
                   !cpumask_test_cpu(cpu, &rqd->tickled)) )
     {
-        ASSERT(cpumask_cycle(cpu, new->vcpu->cpu_hard_affinity) == cpu);
-        SCHED_STAT_CRANK(tickled_idle_cpu_excl);
-        ipid = cpu;
-        goto tickle;
+        /*
+         * If group scheduling is enabled, what's running on the
+         * other pCPUs of the coscheduling group also matters.
+         */
+        if ( !grpsched_enabled() || gscd->sdom == NULL ||
+             gscd->sdom == new->sdom )
+        {
+            ASSERT(gscd->nr_running < cpumask_weight(&gscd->cpus));
+            ASSERT(cpumask_cycle(cpu, new->vcpu->cpu_hard_affinity) == cpu);
+            SCHED_STAT_CRANK(tickled_idle_cpu_excl);
+            ipid = cpu;
+            goto tickle;
+        }
     }
 
     for_each_affinity_balance_step( bs )
@@ -1617,6 +1627,8 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
          */
         if ( unlikely(sched_smt_power_savings) )
         {
+            /* XXX deal with grpsched_enabled() == true */
+
             cpumask_andnot(&mask, &rqd->idle, &rqd->smt_idle);
             cpumask_and(&mask, &mask, online);
         }
@@ -1626,6 +1638,15 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         i = cpumask_test_or_cycle(cpu, &mask);
         if ( i < nr_cpu_ids )
         {
+            struct csched2_grpsched_data *igscd = c2gscd(i);
+
+            ASSERT(igscd->nr_running < cpumask_weight(&igscd->cpus));
+            /*
+             * If we're doing core-scheduling, the CPU being in smt_idle also
+             * means that there are no other vcpus running in the group.
+             */
+            ASSERT(opt_grpsched != OPT_TOPOLOGY_CORE ||
+                   (igscd->sdom == NULL && igscd->nr_running == 0));
             SCHED_STAT_CRANK(tickled_idle_cpu);
             ipid = i;
             goto tickle;
@@ -1640,11 +1661,36 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
         cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu), online);
         cpumask_and(&mask, &mask, cpumask_scratch_cpu(cpu));
         i = cpumask_test_or_cycle(cpu, &mask);
-        if ( i < nr_cpu_ids )
+        /*
+         * If we don't have group scheduling enabled, any CPU in the mask
+         * is fine. And in fact, during the very first iteration, we take
+         * the 'if', and go to tickling.
+         *
+         * If, OTOH, that is enabled, we want to tickle CPUs that are in
+         * groups where other vcpus of new's domain are running already.
+         *
+         * XXX Potential optimization: if we use a data structure where we
+         *     keep track, for each domain, on what pCPUs the vcpus of the
+         *     domain itself are currently running, we can probably avoid
+         *     the loop.
+         */
+        while ( !cpumask_empty(&mask) )
         {
-            SCHED_STAT_CRANK(tickled_idle_cpu);
-            ipid = i;
-            goto tickle;
+            struct csched2_grpsched_data *igscd = c2gscd(i);
+
+            ASSERT(i < nr_cpu_ids);
+            ASSERT(is_idle_vcpu(curr_on_cpu(i)) &&
+                   csched2_vcpu(curr_on_cpu(i))->sdom == NULL);
+            ASSERT(igscd->nr_running < cpumask_weight(&igscd->cpus));
+            if ( !grpsched_enabled() || igscd->sdom == NULL ||
+                 igscd->sdom == new->sdom)
+            {
+                SCHED_STAT_CRANK(tickled_idle_cpu);
+                ipid = i;
+                goto tickle;
+            }
+            __cpumask_clear_cpu(i, &mask);
+            i = cpumask_cycle(i, &mask);
         }
     }
 
@@ -1667,7 +1713,10 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
     cpumask_andnot(&mask, &rqd->active, &rqd->idle);
     cpumask_andnot(&mask, &mask, &rqd->tickled);
     cpumask_and(&mask, &mask, cpumask_scratch_cpu(cpu));
-    if ( __cpumask_test_and_clear_cpu(cpu, &mask) )
+    if ( __cpumask_test_and_clear_cpu(cpu, &mask) &&
+         (!grpsched_enabled() || gscd->sdom == NULL ||
+          gscd->sdom == new->sdom ||
+          (gscd->nr_running == 1 && !is_idle_vcpu(curr_on_cpu(cpu)))) )
     {
         s_time_t score = tickle_score(ops, now, new, cpu);
 
@@ -1687,10 +1736,16 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
 
     for_each_cpu(i, &mask)
     {
+        struct csched2_grpsched_data *igscd = c2gscd(i);
         s_time_t score;
 
         /* Already looked at this one above */
         ASSERT(i != cpu);
+
+        if ( grpsched_enabled() && igscd->sdom != NULL &&
+             igscd->sdom != new->sdom &&
+             !(igscd->nr_running == 1 && !is_idle_vcpu(curr_on_cpu(i))) )
+            continue;
 
         score = tickle_score(ops, now, new, i);
 
