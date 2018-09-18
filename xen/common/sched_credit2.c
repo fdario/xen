@@ -3476,7 +3476,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
                unsigned int *skipped)
 {
     struct list_head *iter, *temp;
-    struct csched2_vcpu *snext = NULL;
+    struct csched2_vcpu *first_svc, *snext = NULL;
     struct csched2_private *prv = csched2_priv(per_cpu(scheduler, cpu));
     struct csched2_grpsched_data *gscd = c2gscd(cpu);
     bool yield = false, soft_aff_preempt = false;
@@ -3568,11 +3568,28 @@ runq_candidate(struct csched2_runqueue_data *rqd,
      * Of course, we also default to idle also if scurr is not runnable.
      */
     if ( vcpu_runnable(scurr->vcpu) && !soft_aff_preempt )
+
         snext = scurr;
     else
         snext = csched2_vcpu(idle_vcpu[cpu]);
 
  check_runq:
+    /*
+     * To retain fairness, and avoid starvation issues, we don't let
+     * group scheduling make us run vcpus which are too far behing (i.e.,
+     * have less credits) than what is currently in the runqueue.
+     *
+     * XXX Just use MIN_TIMER as the threshold, for now.
+     */
+    first_svc = list_entry(&rqd->runq, struct csched2_vcpu, runq_elem);
+    if ( grpsched_enabled() && !is_idle_vcpu(scurr->vcpu) &&
+         !list_empty(&rqd->runq) )
+    {
+        ASSERT(gscd->sdom != NULL);
+        if ( scurr->credit < first_svc->credit - CSCHED2_MIN_TIMER )
+            snext = csched2_vcpu(idle_vcpu[cpu]);
+    }
+
     list_for_each_safe( iter, temp, &rqd->runq )
     {
         struct csched2_vcpu * svc = list_entry(iter, struct csched2_vcpu, runq_elem);
@@ -3636,6 +3653,19 @@ runq_candidate(struct csched2_runqueue_data *rqd,
             SCHED_STAT_CRANK(migrate_resisted);
             continue;
         }
+
+        /*
+         * As stated above, let's not go too far and risk picking up
+         * a vcpu which has too much lower credits than the one we would
+         * have picked if group scheduling was not enabled.
+         *
+         * There's a risk that this means leaving the CPU idle (if we don't
+         * find vcpus that satisfy this rule, and also the group scheduling
+         * constraints)... but that's what coscheduling is all about!
+         */
+        if ( grpsched_enabled() && gscd->sdom != NULL &&
+             svc->credit < first_svc->credit - CSCHED2_MIN_TIMER )
+            break;
 
         /*
          * If the one in the runqueue has more credit than current (or idle,
