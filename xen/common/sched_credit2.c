@@ -3658,7 +3658,7 @@ dump_pcpu(const struct scheduler *ops, int cpu)
 #define cpustr keyhandler_scratch
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_sibling_mask, cpu));
-    printk("CPU[%02d] runq=%d, sibling=%s, ", cpu, c2r(cpu), cpustr);
+    printk(" CPU[%02d] runq=%d, sibling=%s, ", cpu, c2r(cpu), cpustr);
     cpumask_scnprintf(cpustr, sizeof(cpustr), per_cpu(cpu_core_mask, cpu));
     printk("core=%s\n", cpustr);
 
@@ -3760,7 +3760,8 @@ csched2_dump(const struct scheduler *ops)
         /* We need the lock to scan the runqueue. */
         spin_lock(&rqd->lock);
 
-        printk("Runqueue %d:\n", i);
+        printk("Runqueue %d:\n", rqd->id);
+        printk("CPUs:\n");
 
         for_each_cpu(j, &rqd->active)
             dump_pcpu(ops, j);
