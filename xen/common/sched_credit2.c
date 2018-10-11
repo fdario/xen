@@ -434,34 +434,43 @@ integer_param("credit2_cap_period_ms", opt_cap_period);
  * either the same physical core, the same physical socket, the same NUMA
  * node, or just all of them, will be put together to form runqueues.
  */
-#define OPT_RUNQUEUE_CPU    0
-#define OPT_RUNQUEUE_CORE   1
-#define OPT_RUNQUEUE_SOCKET 2
-#define OPT_RUNQUEUE_NODE   3
-#define OPT_RUNQUEUE_ALL    4
-static const char *const opt_runqueue_str[] = {
-    [OPT_RUNQUEUE_CPU] = "cpu",
-    [OPT_RUNQUEUE_CORE] = "core",
-    [OPT_RUNQUEUE_SOCKET] = "socket",
-    [OPT_RUNQUEUE_NODE] = "node",
-    [OPT_RUNQUEUE_ALL] = "all"
+#define OPT_TOPOLOGY_CPU    0
+#define OPT_TOPOLOGY_CORE   1
+#define OPT_TOPOLOGY_NODE   2
+#define OPT_TOPOLOGY_SOCKET 3
+#define OPT_TOPOLOGY_ALL    4
+static const char *const opt_topospan_str[] = {
+    [OPT_TOPOLOGY_CPU] = "cpu",
+    [OPT_TOPOLOGY_CORE] = "core",
+    [OPT_TOPOLOGY_NODE] = "node",
+    [OPT_TOPOLOGY_SOCKET] = "socket",
+    [OPT_TOPOLOGY_ALL] = "all"
 };
-static int __read_mostly opt_runqueue = OPT_RUNQUEUE_SOCKET;
 
-static int __init parse_credit2_runqueue(const char *s)
+static int __init parse_topology_span(const char *s)
 {
     unsigned int i;
 
-    for ( i = 0; i < ARRAY_SIZE(opt_runqueue_str); i++ )
+    for ( i = 0; i < ARRAY_SIZE(opt_topospan_str); i++ )
     {
-        if ( !strcmp(s, opt_runqueue_str[i]) )
-        {
-            opt_runqueue = i;
-            return 0;
-        }
+        if ( !strcmp(s, opt_topospan_str[i]) )
+            return i;
     }
 
-    return -EINVAL;
+    return -1;
+}
+
+static int __read_mostly opt_runqueue = OPT_TOPOLOGY_SOCKET;
+
+static int __init parse_credit2_runqueue(const char *s)
+{
+    opt_runqueue = parse_topology_span(s);
+
+    if ( opt_runqueue < 0 )
+        return -EINVAL;
+
+    ASSERT(opt_runqueue <= OPT_TOPOLOGY_ALL );
+    return 0;
 }
 custom_param("credit2_runqueue", parse_credit2_runqueue);
 
@@ -883,12 +892,12 @@ cpu_to_runqueue(struct csched2_private *prv, unsigned int cpu)
         BUG_ON(cpu_to_socket(cpu) == XEN_INVALID_SOCKET_ID ||
                cpu_to_socket(peer_cpu) == XEN_INVALID_SOCKET_ID);
 
-        if (opt_runqueue == OPT_RUNQUEUE_CPU)
+        if (opt_runqueue == OPT_TOPOLOGY_CPU)
             continue;
-        if ( opt_runqueue == OPT_RUNQUEUE_ALL ||
-             (opt_runqueue == OPT_RUNQUEUE_CORE && same_core(peer_cpu, cpu)) ||
-             (opt_runqueue == OPT_RUNQUEUE_SOCKET && same_socket(peer_cpu, cpu)) ||
-             (opt_runqueue == OPT_RUNQUEUE_NODE && same_node(peer_cpu, cpu)) )
+        if ( opt_runqueue == OPT_TOPOLOGY_ALL ||
+             (opt_runqueue == OPT_TOPOLOGY_CORE && same_core(peer_cpu, cpu)) ||
+             (opt_runqueue == OPT_TOPOLOGY_SOCKET && same_socket(peer_cpu, cpu)) ||
+             (opt_runqueue == OPT_TOPOLOGY_NODE && same_node(peer_cpu, cpu)) )
             break;
     }
 
@@ -4021,7 +4030,7 @@ csched2_init(struct scheduler *ops)
            opt_load_window_shift,
            opt_underload_balance_tolerance,
            opt_overload_balance_tolerance,
-           opt_runqueue_str[opt_runqueue],
+           opt_topospan_str[opt_runqueue],
            opt_cap_period);
 
     printk(XENLOG_INFO "load tracking window length %llu ns\n",
