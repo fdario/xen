@@ -922,7 +922,8 @@ cpu_runqueue_siblings_match(const struct csched2_runqueue_data *rqd,
 }
 
 static struct csched2_runqueue_data *
-cpu_add_to_runqueue(const struct scheduler *ops, unsigned int cpu)
+cpu_add_to_runqueue(const struct scheduler *ops, unsigned int nr_cpus,
+                    unsigned int cpu)
 {
     struct csched2_private *prv = csched2_priv(ops);
     struct csched2_runqueue_data *rqd, *rqd_new;
@@ -943,8 +944,8 @@ cpu_add_to_runqueue(const struct scheduler *ops, unsigned int cpu)
      * how many CPUs we have, so let's use the number of CPUs that are online
      * for that.
      */
-    min_rqs = ((num_online_cpus() - 1) / opt_max_cpus_runqueue) + 1;
-    max_cpus_runq = num_online_cpus() / min_rqs;
+    min_rqs = ((nr_cpus - 1) / opt_max_cpus_runqueue) + 1;
+    max_cpus_runq = nr_cpus / min_rqs;
 
     write_lock_irqsave(&prv->lock, flags);
 
@@ -3781,8 +3782,10 @@ csched2_dump(const struct scheduler *ops)
      */
     read_lock_irqsave(&prv->lock, flags);
 
-    printk("Active queues: %d\n"
+    printk("Active CPUs: %u\n"
+           "Active queues: %u\n"
            "\tdefault-weight     = %d\n",
+           cpumask_weight(&prv->initialized),
            prv->active_queues,
            CSCHED2_DEFAULT_WEIGHT);
     list_for_each_entry ( rqd, &prv->rql, rql )
@@ -3879,6 +3882,7 @@ csched2_alloc_pdata(const struct scheduler *ops, int cpu)
 {
     struct csched2_pcpu *spc;
     struct csched2_runqueue_data *rqd;
+    unsigned int nr_cpus;
 
     BUG_ON(cpu_to_socket(cpu) == XEN_INVALID_SOCKET_ID);
 
@@ -3886,7 +3890,23 @@ csched2_alloc_pdata(const struct scheduler *ops, int cpu)
     if ( spc == NULL )
         return ERR_PTR(-ENOMEM);
 
-    rqd = cpu_add_to_runqueue(ops, cpu);
+    /*
+     * If the system is booting, we know that, at this point, num_online_cpus()
+     * CPUs have been brought up, and will be added to the default cpupool and
+     * hence to this scheduler. This is valuable information that we can use
+     * to build the runqueues in an already balanced state.
+     *
+     * On the other hand, when we are live, and e.g., are creating a new
+     * cpupool, or adding CPUs to an already existing one,  we have no way to
+     * know in advance, from here, how many CPUs it will have. Therefore, in
+     * that case, we just use the current number of CPUs that the pool has,
+     * plus 1, because we are in the process of adding it, for the balancing.
+     * This will likely provide suboptimal results, and we rely on dynamic
+     * runqueue rebalancing for fixing it up.
+     */
+    nr_cpus = system_state < SYS_STATE_active ? num_online_cpus() :
+        cpumask_weight(&csched2_priv(ops)->initialized) + 1;
+    rqd = cpu_add_to_runqueue(ops, nr_cpus, cpu);
     if ( IS_ERR(rqd) )
     {
         xfree(spc);
