@@ -3983,6 +3983,194 @@ init_pdata(struct csched2_private *prv, struct csched2_pcpu *spc,
     return rqd;
 }
 
+/*
+ * Let's get the hard work of rebalancing runqueues done.
+ *
+ * This function is called from a tasklet, spawned by cpupool_sync().
+ * We run in idle vcpu context and we can assume that all the vcpus of all
+ * the domains within this cpupool are stopped... So we are relatively free
+ * to manipulate the scheduler's runqueues.
+ */
+static void do_rebalance_runqueues(void *arg)
+{
+    const struct scheduler *ops = arg;
+    struct csched2_private *prv = csched2_priv(ops);
+    struct csched2_runqueue_data *rqd, *rqd_temp;
+    struct csched2_unit *csu, *csu_temp;
+    struct list_head rq_list, csu_list;
+    spinlock_t temp_lock;
+    unsigned long flags;
+    unsigned int cpu;
+
+    INIT_LIST_HEAD(&rq_list);
+    INIT_LIST_HEAD(&csu_list);
+    spin_lock_init(&temp_lock);
+
+    /*
+     * This is where we will temporarily re-route the locks of all the CPUs,
+     * while we take them outside of their current runqueue, and before adding
+     * them to their new ones. Let's just take it right away, so any sort of
+     * scheduling activity in any of them will stop at it, and won't race with
+     * us.
+     */
+    spin_lock_irq(&temp_lock);
+
+    /*
+     * Everyone is paused, so we don't have any unit in any runqueue. Still,
+     * units are "assigned" each one to a runqueue, for debug dumps and for
+     * calculating and tracking the weights. Since the current runqueues are
+     * going away, we need to deassign everyone from its runqueue. We will
+     * put all of them back into one of the new runqueue, before the end.
+     */
+    write_lock(&prv->lock);
+    list_for_each_entry_safe ( rqd, rqd_temp, &prv->rql, rql )
+    {
+        spin_lock(&rqd->lock);
+        /*
+         * We're deassigning the units, but we don't want to loose track
+         * of them... Otherwise how do we do the re-assignment to the new
+         * runqueues? So, let's stash them in a list.
+         */
+        list_for_each_entry_safe ( csu, csu_temp, &rqd->svc, rqd_elem )
+        {
+            runq_deassign(csu->unit);
+            list_add(&csu->rqd_elem, &csu_list);
+        }
+
+        /*
+         * Now we want to prepare for getting rid of the runqueues as well.
+         * Each CPU has a pointer to the scheduler lock, which in case of
+         * Credit2 is the runqueue lock of the runqueue where the CPU is.
+         * But again, runqueues are vanishing, so let's re-route all such
+         * locks to our safe temporary solution that we introduced above.
+         */
+        for_each_cpu ( cpu, &rqd->active )
+            get_sched_res(cpu)->schedule_lock = &temp_lock;
+        spin_unlock(&rqd->lock);
+
+        /*
+         * And, finally, "dequeue the runqueues", one by one. Similarly to
+         * what we do with units, we need to park them in a temporary list.
+         * In this case, they are actually going away, but we need to do this
+         * because we can't free() them with IRQs disabled.
+         */
+        prv->active_queues--;
+        list_del(&rqd->rql);
+        list_add(&rqd->rql, &rq_list);
+    }
+    ASSERT(prv->active_queues == 0);
+    write_unlock(&prv->lock);
+
+    spin_unlock_irq(&temp_lock);
+
+    /*
+     * Since we have to drop the lock anyway (in order to be able to call
+     * cpu_add_to_runqueue() below), let's also get rid of the old runqueues,
+     * now that we can.
+     */
+    list_for_each_entry_safe ( rqd, rqd_temp, &rq_list, rql )
+    {
+        list_del(&rqd->rql);
+        xfree(rqd);
+    }
+    rqd = NULL;
+
+    /*
+     * We've got no lock! Well, this is still fine as:
+     * - the CPUs may, for some reason, try to schedule, and manage to do so,
+     *   taking turns on our global temporary spinlock. But there should be
+     *   nothing to schedule;
+     * - we are safe from more cpupool manipulations as cpupool_sync() owns
+     *   the cpupool_lock.
+     */
+
+    /*
+     * Now, for each CPU, we have to put them back in a runqueue. Of course,
+     * we have no runqueue any longer, so they'll be re-created. We basically
+     * follow pretty much the exact same path of when we add a CPU to a pool.
+     */
+    for_each_cpu ( cpu, &prv->initialized )
+    {
+        struct csched2_pcpu *spc = csched2_pcpu(cpu);
+
+        /*
+         * The new runqueues need to be allocated, and cpu_add_to_runqueue()
+         * takes care of that. We are, however, in a very delicate state, as
+         * we have destroyed all the previous runqueues. I.e., if an error
+         * (e.g., not enough memory) occurs here, there is no way we can
+         * go back to a sane previous state, so let's just crash.
+         *
+         * Note that, at this time, the number of CPUs we have in the
+         * "initialized" mask represents how many CPUs we have in this pool.
+         * So we can use it, for computing the balance, basically in the same
+         * way as we use num_online_cpu() during boot time. 
+         */
+        rqd = cpu_add_to_runqueue(ops, cpumask_weight(&prv->initialized), cpu);
+        if ( IS_ERR(rqd) )
+        {
+            printk(XENLOG_ERR " Major problems while rebalancing the runqueues!\n");
+            BUG();
+        }
+        spc->rqd = rqd;
+
+        spin_lock_irq(&temp_lock);
+        write_lock(&prv->lock);
+
+        init_cpu_runqueue(prv, spc, cpu, rqd);
+
+        /*
+         * Bring the scheduler lock back to where it belongs, given the new
+         * runqueue, for the various CPUs. Barrier is there because we want
+         * all the runqueue initialization steps that we have made to be
+         * visible, exactly as it was for everyone that takes the lock
+         * (see the comment in common/sched/core.c:schedule_cpu_add() ).
+         */
+        smp_wmb();
+        get_sched_res(cpu)->schedule_lock = &rqd->lock;
+
+        write_unlock(&prv->lock);
+        spin_unlock_irq(&temp_lock);
+    }
+
+    /*
+     * And, finally, everything should be in place again. We can finalize the
+     * work by adding back the units in the runqueues' lists (picking them
+     * up from the temporary list we used). Note that it is not necessary to
+     * call csched2_res_pick(), for deciding on which runqueue to put each
+     * of them. Thins is:
+     *  - with the old runqueue, each entity was associated to a
+     *    sched_resource / CPU;
+     *  - they where assigned to the runqueue in which such CPU was;
+     *  - all the CPUs that were there, with the old runqueues, are still
+     *    here, although in different runqueues;
+     *  - we can just let the units be associated with the runqueues where
+     *    theirs CPU has gone.
+     *
+     *  This means that, even though the load was balanced, with the previous
+     *  runqueues, it now most likely now will not be. But this is not a big
+     *  deal as the load balancer will make things even again, given a little
+     *  time.
+     */
+    list_for_each_entry_safe ( csu, csu_temp, &csu_list, rqd_elem )
+    {
+        spinlock_t *lock;
+
+        lock = unit_schedule_lock_irqsave(csu->unit, &flags);
+        list_del_init(&csu->rqd_elem);
+        runq_assign(csu->unit);
+        unit_schedule_unlock_irqrestore(lock, flags, csu->unit);
+    }
+}
+
+static void rebalance_runqueues(const struct scheduler *ops)
+{
+    struct cpupool *c = ops->cpupool;
+
+    ASSERT(c->sched == ops);
+
+    cpupool_sync(c, do_rebalance_runqueues);
+}
+
 /* Change the scheduler of cpu to us (Credit2). */
 static spinlock_t *
 csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
@@ -4016,6 +4204,16 @@ csched2_switch_sched(struct scheduler *new_ops, unsigned int cpu,
      * private global lock.
      */
     ASSERT(get_sched_res(cpu)->schedule_lock != &rqd->lock);
+
+    /*
+     * We have added a CPU to the pool. Unless we are booting (in which
+     * case cpu_add_to_runqueue() balances the CPUs by itself) or we are in
+     * the very special case of still having fewer CPUs than how many we
+     * can put in just one runqueue... We need to try to rebalance.
+     */
+    if ( system_state >= SYS_STATE_active &&
+          cpumask_weight(&prv->initialized) > opt_max_cpus_runqueue )
+        rebalance_runqueues(new_ops);
 
     write_unlock(&prv->lock);
 
@@ -4105,7 +4303,15 @@ csched2_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     else
         rqd = NULL;
 
-    write_unlock_irqrestore(&prv->lock, flags);
+    /*
+     * Similarly to what said in csched2_switch_sched(), since we have just
+     * removed a CPU, it's good to check whether we can rebalance the
+     * runqueues.
+     */
+    if ( cpumask_weight(&prv->initialized) >= opt_max_cpus_runqueue )
+        rebalance_runqueues(ops);
+
+     write_unlock_irqrestore(&prv->lock, flags);
 
     xfree(rqd);
     xfree(pcpu);
