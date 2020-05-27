@@ -234,6 +234,42 @@ void cpupool_put(struct cpupool *pool)
     free_cpupool_struct(pool);
 }
 
+void do_cpupool_sync(void *arg)
+{
+    struct cpupool *c = arg;
+    struct domain *d;
+
+
+    spin_lock(&cpupool_lock);
+
+    /*
+     * With this second call (and this time to domain_pause()) we basically
+     * make sure that all the domains have actually stopped running.
+     */
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain_in_cpupool(d, c)
+        domain_pause(d);
+    rcu_read_unlock(&domlist_read_lock);
+
+    /*
+     * Let's invoke the function that the caller provided. We pass a reference
+     * to our own scheduler as a parameter, with which it should easily reach
+     * anything it needs.
+     */
+    c->sync_ctl.func(c->sched);
+
+    /* We called pause twice, so we need to to the same with unpause. */
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain_in_cpupool(d, c)
+    {
+        domain_unpause(d);
+        domain_unpause(d);
+    }
+    rcu_read_unlock(&domlist_read_lock);
+
+    spin_unlock(&cpupool_lock);
+}
+
 /*
  * create a new cpupool with specified poolid and scheduler
  * returns pointer to new cpupool structure if okay, NULL else
@@ -292,6 +328,8 @@ static struct cpupool *cpupool_create(
 
     *q = c;
 
+    tasklet_init(&c->sync_ctl.tasklet, do_cpupool_sync, c);
+
     spin_unlock(&cpupool_lock);
 
     debugtrace_printk("Created cpupool %d with scheduler %s (%s)\n",
@@ -332,6 +370,7 @@ static int cpupool_destroy(struct cpupool *c)
         return -EBUSY;
     }
     *q = c->next;
+    tasklet_kill(&c->sync_ctl.tasklet);
     spin_unlock(&cpupool_lock);
 
     cpupool_put(c);
@@ -370,6 +409,19 @@ int cpupool_move_domain(struct domain *d, struct cpupool *c)
     spin_unlock(&cpupool_lock);
 
     return ret;
+}
+
+void cpupool_sync(struct cpupool *c, void (*func)(void*))
+{
+    struct domain *d;
+
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain_in_cpupool(d, c)
+        domain_pause_nosync(d);
+    rcu_read_unlock(&domlist_read_lock);
+
+    c->sync_ctl.func = func;
+    tasklet_schedule_on_cpu(&c->sync_ctl.tasklet, cpumask_first(c->cpu_valid));
 }
 
 /*

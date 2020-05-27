@@ -503,6 +503,11 @@ static inline void sched_unit_unpause(const struct sched_unit *unit)
 #define REGISTER_SCHEDULER(x) static const struct scheduler *x##_entry \
   __used_section(".data.schedulers") = &x;
 
+struct cpupool_sync_ctl {
+    struct tasklet tasklet;
+    void (*func)(void*);
+};
+
 struct cpupool
 {
     int              cpupool_id;
@@ -514,6 +519,7 @@ struct cpupool
     struct scheduler *sched;
     atomic_t         refcnt;
     enum sched_gran  gran;
+    struct cpupool_sync_ctl sync_ctl;
 };
 
 static inline cpumask_t *cpupool_domain_master_cpumask(const struct domain *d)

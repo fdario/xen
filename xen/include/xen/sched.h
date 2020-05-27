@@ -1061,6 +1061,7 @@ extern enum cpufreq_controller {
 } cpufreq_controller;
 
 int cpupool_move_domain(struct domain *d, struct cpupool *c);
+void cpupool_sync(struct cpupool *c, void (*func)(void*));
 int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op);
 int cpupool_get_id(const struct domain *d);
 const cpumask_t *cpupool_valid_cpus(const struct cpupool *pool);
