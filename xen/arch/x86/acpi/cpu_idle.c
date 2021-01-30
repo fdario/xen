@@ -714,8 +714,8 @@ static void acpi_processor_idle(void)
 
     cpufreq_dbs_timer_suspend();
 
-    rcu_idle_enter(cpu);
-    /* rcu_idle_enter() can raise TIMER_SOFTIRQ. Process it now. */
+    rcu_quiet_enter();
+    /* rcu_quiet_enter() can raise TIMER_SOFTIRQ. Process it now. */
     process_pending_softirqs();
 
     /*
@@ -727,7 +727,7 @@ static void acpi_processor_idle(void)
     if ( !cpu_is_haltable(cpu) )
     {
         local_irq_enable();
-        rcu_idle_exit(cpu);
+        rcu_quiet_exit();
         cpufreq_dbs_timer_resume();
         return;
     }
@@ -852,7 +852,7 @@ static void acpi_processor_idle(void)
         /* Now in C0 */
         power->last_state = &power->states[0];
         local_irq_enable();
-        rcu_idle_exit(cpu);
+        rcu_quiet_exit();
         cpufreq_dbs_timer_resume();
         return;
     }
@@ -860,7 +860,7 @@ static void acpi_processor_idle(void)
     /* Now in C0 */
     power->last_state = &power->states[0];
 
-    rcu_idle_exit(cpu);
+    rcu_quiet_exit();
     cpufreq_dbs_timer_resume();
 
     if ( cpuidle_current_governor->reflect )

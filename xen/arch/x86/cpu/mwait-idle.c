@@ -778,8 +778,8 @@ static void mwait_idle(void)
 
 	cpufreq_dbs_timer_suspend();
 
-	rcu_idle_enter(cpu);
-	/* rcu_idle_enter() can raise TIMER_SOFTIRQ. Process it now. */
+	rcu_quiet_enter();
+	/* rcu_quiet_enter() can raise TIMER_SOFTIRQ. Process it now. */
 	process_pending_softirqs();
 
 	/* Interrupts must be disabled for C2 and higher transitions. */
@@ -787,7 +787,7 @@ static void mwait_idle(void)
 
 	if (!cpu_is_haltable(cpu)) {
 		local_irq_enable();
-		rcu_idle_exit(cpu);
+		rcu_quiet_exit();
 		cpufreq_dbs_timer_resume();
 		return;
 	}
@@ -829,7 +829,7 @@ static void mwait_idle(void)
 	if (!(lapic_timer_reliable_states & (1 << cx->type)))
 		lapic_timer_on();
 
-	rcu_idle_exit(cpu);
+	rcu_quiet_exit();
 	cpufreq_dbs_timer_resume();
 
 	if ( cpuidle_current_governor->reflect )

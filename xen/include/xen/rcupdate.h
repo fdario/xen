@@ -177,7 +177,7 @@ void call_rcu(struct rcu_head *head,
 
 void rcu_barrier(void);
 
-void rcu_idle_enter(unsigned int cpu);
-void rcu_idle_exit(unsigned int cpu);
+void rcu_quiet_enter(void);
+void rcu_quiet_exit(void);
 
 #endif /* __XEN_RCUPDATE_H */

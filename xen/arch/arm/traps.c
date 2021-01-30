@@ -2048,6 +2048,8 @@ void enter_hypervisor_from_guest(void)
 {
     struct vcpu *v = current;
 
+    rcu_quiet_exit();
+
     /*
      * If we pended a virtual abort, preserve it until it gets cleared.
      * See ARM ARM DDI 0487A.j D1.14.3 (Virtual Interrupts) for details,
@@ -2326,6 +2328,8 @@ static bool check_for_vcpu_work(void)
  */
 void leave_hypervisor_to_guest(void)
 {
+    rcu_quiet_enter();
+
     local_irq_disable();
 
     /*

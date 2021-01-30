@@ -55,8 +55,8 @@ static struct rcu_ctrlblk {
     int  next_pending;  /* Is the next batch already waiting?         */
 
     spinlock_t  lock __cacheline_aligned;
-    cpumask_t   cpumask; /* CPUs that need to switch in order ...   */
-    cpumask_t   ignore_cpumask; /* ... unless they are already idle */
+    cpumask_t   cpumask; /* CPUs that need to switch in order...      */
+    cpumask_t   ignore_cpumask; /* ...unless already idle or in guest */
     /* for current batch to proceed.        */
 } __cacheline_aligned rcu_ctrlblk = {
     .cur = -300,
@@ -87,7 +87,7 @@ struct rcu_data {
     int cpu;
     long            last_rs_qlen;     /* qlen during the last resched */
 
-    /* 3) idle CPUs handling */
+    /* 3) idle (or in guest mode) CPUs handling */
     struct timer cb_timer;
     bool cb_timer_active;
 
@@ -111,6 +111,12 @@ struct rcu_data {
  *    running;
  * 3) it is stopped immediately, if the CPU wakes up from idle and
  *    resumes 'normal' execution.
+ *
+ * Note also that the same happens if a CPU starts executing a guest that
+ * (almost) never comes back into the hypervisor. This may be the case if
+ * the guest uses "idle=poll" / "vwfi=native". Therefore, we need to handle
+ * guest entry events in the same way as the CPU going idle, i.e., consider
+ * it quiesced and arm the timer.
  *
  * About how far in the future the timer should be programmed each time,
  * it's hard to tell (guess!!). Since this mimics Linux's periodic timer
@@ -359,9 +365,10 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
         * Make sure the increment of rcp->cur is visible so, even if a
         * CPU that is about to go idle, is captured inside rcp->cpumask,
         * rcu_pending() will return false, which then means cpu_quiet()
-        * will be invoked, before the CPU would actually enter idle.
+        * will be invoked, before the CPU would actually go idle (or
+	* enter a guest).
         *
-        * This barrier is paired with the one in rcu_idle_enter().
+        * This barrier is paired with the one in rcu_quiet_enter().
         */
         smp_mb();
         cpumask_andnot(&rcp->cpumask, &cpu_online_map, &rcp->ignore_cpumask);
@@ -531,14 +538,15 @@ int rcu_needs_cpu(int cpu)
  * periodically poke rcu_pedning(), so that it will invoke the callback
  * not too late after the end of the grace period.
  */
-static void cb_timer_start(void)
+static void cb_timer_start(unsigned int cpu)
 {
-    struct rcu_data *rdp = &this_cpu(rcu_data);
+    struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
 
     /*
      * Note that we don't check rcu_pending() here. In fact, we don't want
      * the timer armed on CPUs that are in the process of quiescing while
-     * going idle, unless they really are the ones with a queued callback.
+     * going idle or entering guest mode, unless they really have queued
+     * callbacks.
      */
     if (likely(!rdp->curlist))
         return;
@@ -547,9 +555,9 @@ static void cb_timer_start(void)
     rdp->cb_timer_active = true;
 }
 
-static void cb_timer_stop(void)
+static void cb_timer_stop(unsigned int cpu)
 {
-    struct rcu_data *rdp = &this_cpu(rcu_data);
+    struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
 
     if (likely(!rdp->cb_timer_active))
         return;
@@ -706,11 +714,14 @@ void __init rcu_init(void)
 }
 
 /*
- * The CPU is becoming idle, so no more read side critical
- * sections, and one more step toward grace period.
+ * The CPU is becoming about to either idle or enter the guest. In any of
+ * these cases, it can't have any outstanding read side critical sections
+ * so this is one step toward the end of the grace period.
  */
-void rcu_idle_enter(unsigned int cpu)
+void rcu_quiet_enter()
 {
+    unsigned int cpu = smp_processor_id();
+
     ASSERT(!cpumask_test_cpu(cpu, &rcu_ctrlblk.ignore_cpumask));
     cpumask_set_cpu(cpu, &rcu_ctrlblk.ignore_cpumask);
     /*
@@ -723,12 +734,14 @@ void rcu_idle_enter(unsigned int cpu)
      */
     smp_mb();
 
-    cb_timer_start();
+    cb_timer_start(cpu);
 }
 
-void rcu_idle_exit(unsigned int cpu)
+void rcu_quiet_exit()
 {
-    cb_timer_stop();
+    unsigned int cpu = smp_processor_id();
+
+    cb_timer_stop(cpu);
     ASSERT(cpumask_test_cpu(cpu, &rcu_ctrlblk.ignore_cpumask));
     cpumask_clear_cpu(cpu, &rcu_ctrlblk.ignore_cpumask);
 }

@@ -47,7 +47,7 @@ static void do_idle(void)
 {
     unsigned int cpu = smp_processor_id();
 
-    rcu_idle_enter(cpu);
+    rcu_quiet_enter();
     /* rcu_idle_enter() can raise TIMER_SOFTIRQ. Process it now. */
     process_pending_softirqs();
 
@@ -59,7 +59,7 @@ static void do_idle(void)
     }
     local_irq_enable();
 
-    rcu_idle_exit(cpu);
+    rcu_quiet_exit();
 }
 
 void idle_loop(void)
