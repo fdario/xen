@@ -55,8 +55,8 @@ static struct rcu_ctrlblk {
     int  next_pending;  /* Is the next batch already waiting?         */
 
     spinlock_t  lock __cacheline_aligned;
-    cpumask_t   cpumask; /* CPUs that need to switch in order ... */
-    cpumask_t   idle_cpumask; /* ... unless they are already idle */
+    cpumask_t   cpumask; /* CPUs that need to switch in order ...   */
+    cpumask_t   ignore_cpumask; /* ... unless they are already idle */
     /* for current batch to proceed.        */
 } __cacheline_aligned rcu_ctrlblk = {
     .cur = -300,
@@ -88,8 +88,8 @@ struct rcu_data {
     long            last_rs_qlen;     /* qlen during the last resched */
 
     /* 3) idle CPUs handling */
-    struct timer idle_timer;
-    bool idle_timer_active;
+    struct timer cb_timer;
+    bool cb_timer_active;
 
     bool            process_callbacks;
     bool            barrier_active;
@@ -121,22 +121,22 @@ struct rcu_data {
  * CPU that is going idle. The user can change this, via a boot time
  * parameter, but only up to 100ms.
  */
-#define IDLE_TIMER_PERIOD_MAX     MILLISECS(100)
-#define IDLE_TIMER_PERIOD_DEFAULT MILLISECS(10)
-#define IDLE_TIMER_PERIOD_MIN     MICROSECS(100)
+#define CB_TIMER_PERIOD_MAX     MILLISECS(100)
+#define CB_TIMER_PERIOD_DEFAULT MILLISECS(10)
+#define CB_TIMER_PERIOD_MIN     MICROSECS(100)
 
-static s_time_t __read_mostly idle_timer_period;
+static s_time_t __read_mostly cb_timer_period;
 
 /*
- * Increment and decrement values for the idle timer handler. The algorithm
+ * Increment and decrement values for the callback timer handler. The algorithm
  * works as follows:
  * - if the timer actually fires, and it finds out that the grace period isn't
- *   over yet, we add IDLE_TIMER_PERIOD_INCR to the timer's period;
+ *   over yet, we add CB_TIMER_PERIOD_INCR to the timer's period;
  * - if the timer actually fires and it finds the grace period over, we
  *   subtract IDLE_TIMER_PERIOD_DECR from the timer's period.
  */
-#define IDLE_TIMER_PERIOD_INCR    MILLISECS(10)
-#define IDLE_TIMER_PERIOD_DECR    MICROSECS(100)
+#define CB_TIMER_PERIOD_INCR    MILLISECS(10)
+#define CB_TIMER_PERIOD_DECR    MICROSECS(100)
 
 static DEFINE_PER_CPU(struct rcu_data, rcu_data);
 
@@ -364,7 +364,7 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
         * This barrier is paired with the one in rcu_idle_enter().
         */
         smp_mb();
-        cpumask_andnot(&rcp->cpumask, &cpu_online_map, &rcp->idle_cpumask);
+        cpumask_andnot(&rcp->cpumask, &cpu_online_map, &rcp->ignore_cpumask);
     }
 }
 
@@ -523,7 +523,7 @@ int rcu_needs_cpu(int cpu)
 {
     struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
 
-    return (rdp->curlist && !rdp->idle_timer_active) || rcu_pending(cpu);
+    return (rdp->curlist && !rdp->cb_timer_active) || rcu_pending(cpu);
 }
 
 /*
@@ -531,7 +531,7 @@ int rcu_needs_cpu(int cpu)
  * periodically poke rcu_pedning(), so that it will invoke the callback
  * not too late after the end of the grace period.
  */
-static void rcu_idle_timer_start(void)
+static void cb_timer_start(void)
 {
     struct rcu_data *rdp = &this_cpu(rcu_data);
 
@@ -543,48 +543,48 @@ static void rcu_idle_timer_start(void)
     if (likely(!rdp->curlist))
         return;
 
-    set_timer(&rdp->idle_timer, NOW() + idle_timer_period);
-    rdp->idle_timer_active = true;
+    set_timer(&rdp->cb_timer, NOW() + cb_timer_period);
+    rdp->cb_timer_active = true;
 }
 
-static void rcu_idle_timer_stop(void)
+static void cb_timer_stop(void)
 {
     struct rcu_data *rdp = &this_cpu(rcu_data);
 
-    if (likely(!rdp->idle_timer_active))
+    if (likely(!rdp->cb_timer_active))
         return;
 
-    rdp->idle_timer_active = false;
+    rdp->cb_timer_active = false;
 
     /*
      * In general, as the CPU is becoming active again, we don't need the
-     * idle timer, and so we want to stop it.
+     * callback timer, and so we want to stop it.
      *
-     * However, in case we are here because idle_timer has (just) fired and
+     * However, in case we are here because cb_timer has (just) fired and
      * has woken up the CPU, we skip stop_timer() now. In fact, when a CPU
      * wakes up from idle, this code always runs before do_softirq() has the
      * chance to check and deal with TIMER_SOFTIRQ. And if we stop the timer
      * now, the TIMER_SOFTIRQ handler will see it as inactive, and will not
-     * call rcu_idle_timer_handler().
+     * call cb_timer_handler().
      *
      * Therefore, if we see that the timer is expired already, we leave it
      * alone. The TIMER_SOFTIRQ handler will then run the timer routine, and
      * deactivate it.
      */
-    if ( !timer_is_expired(&rdp->idle_timer) )
-        stop_timer(&rdp->idle_timer);
+    if ( !timer_is_expired(&rdp->cb_timer) )
+        stop_timer(&rdp->cb_timer);
 }
 
-static void rcu_idle_timer_handler(void* data)
+static void cb_timer_handler(void* data)
 {
-    perfc_incr(rcu_idle_timer);
+    perfc_incr(rcu_callback_timer);
 
     if ( !cpumask_empty(&rcu_ctrlblk.cpumask) )
-        idle_timer_period = min(idle_timer_period + IDLE_TIMER_PERIOD_INCR,
-                                IDLE_TIMER_PERIOD_MAX);
+        cb_timer_period = min(cb_timer_period + CB_TIMER_PERIOD_INCR,
+                                CB_TIMER_PERIOD_MAX);
     else
-        idle_timer_period = max(idle_timer_period - IDLE_TIMER_PERIOD_DECR,
-                                IDLE_TIMER_PERIOD_MIN);
+        cb_timer_period = max(cb_timer_period - CB_TIMER_PERIOD_DECR,
+                                CB_TIMER_PERIOD_MIN);
 }
 
 void rcu_check_callbacks(int cpu)
@@ -608,7 +608,7 @@ static void rcu_move_batch(struct rcu_data *this_rdp, struct rcu_head *list,
 static void rcu_offline_cpu(struct rcu_data *this_rdp,
                             struct rcu_ctrlblk *rcp, struct rcu_data *rdp)
 {
-    kill_timer(&rdp->idle_timer);
+    kill_timer(&rdp->cb_timer);
 
     /* If the cpu going offline owns the grace period we can block
      * indefinitely waiting for it, so flush it here.
@@ -638,7 +638,7 @@ static void rcu_init_percpu_data(int cpu, struct rcu_ctrlblk *rcp,
     rdp->qs_pending = 0;
     rdp->cpu = cpu;
     rdp->blimit = blimit;
-    init_timer(&rdp->idle_timer, rcu_idle_timer_handler, rdp, cpu);
+    init_timer(&rdp->cb_timer, cb_timer_handler, rdp, cpu);
 }
 
 static int cpu_callback(
@@ -667,25 +667,39 @@ static struct notifier_block cpu_nfb = {
     .notifier_call = cpu_callback
 };
 
+/*
+ * We're changing the name of the parameter, to better reflect the fact that
+ * the timer is used for callbacks in general, when the CPU is either idle
+ * or executing guest code. We still accept the old parameter but, if both
+ * are specified, the new one ("rcu-callback-timer-period-ms") has priority.
+ */
+#define CB_TIMER_PERIOD_DEFAULT_MS ( CB_TIMER_PERIOD_DEFAULT / MILLISECS(1) )
+static unsigned int __initdata cb_timer_period_ms = CB_TIMER_PERIOD_DEFAULT_MS;
+integer_param("rcu-callback-timer-period-ms", cb_timer_period_ms);
+
+static unsigned int __initdata idle_timer_period_ms = CB_TIMER_PERIOD_DEFAULT_MS;
+integer_param("rcu-idle-timer-period-ms", idle_timer_period_ms);
+
 void __init rcu_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
-    static unsigned int __initdata idle_timer_period_ms =
-                                    IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
-    integer_param("rcu-idle-timer-period-ms", idle_timer_period_ms);
+
+    if (idle_timer_period_ms != CB_TIMER_PERIOD_DEFAULT_MS &&
+        cb_timer_period_ms == CB_TIMER_PERIOD_DEFAULT_MS)
+        cb_timer_period_ms = idle_timer_period_ms;
 
     /* We don't allow 0, or anything higher than IDLE_TIMER_PERIOD_MAX */
-    if ( idle_timer_period_ms == 0 ||
-         idle_timer_period_ms > IDLE_TIMER_PERIOD_MAX / MILLISECS(1) )
+    if ( cb_timer_period_ms == 0 ||
+         cb_timer_period_ms > CB_TIMER_PERIOD_MAX / MILLISECS(1) )
     {
-        idle_timer_period_ms = IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
-        printk("WARNING: rcu-idle-timer-period-ms outside of "
+        cb_timer_period_ms = CB_TIMER_PERIOD_DEFAULT / MILLISECS(1);
+        printk("WARNING: rcu-callback-timer-period-ms outside of "
                "(0,%"PRI_stime"]. Resetting it to %u.\n",
-               IDLE_TIMER_PERIOD_MAX / MILLISECS(1), idle_timer_period_ms);
+               CB_TIMER_PERIOD_MAX / MILLISECS(1), cb_timer_period_ms);
     }
-    idle_timer_period = MILLISECS(idle_timer_period_ms);
+    cb_timer_period = MILLISECS(cb_timer_period_ms);
 
-    cpumask_clear(&rcu_ctrlblk.idle_cpumask);
+    cpumask_clear(&rcu_ctrlblk.ignore_cpumask);
     cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
     register_cpu_notifier(&cpu_nfb);
     open_softirq(RCU_SOFTIRQ, rcu_process_callbacks);
@@ -697,8 +711,8 @@ void __init rcu_init(void)
  */
 void rcu_idle_enter(unsigned int cpu)
 {
-    ASSERT(!cpumask_test_cpu(cpu, &rcu_ctrlblk.idle_cpumask));
-    cpumask_set_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
+    ASSERT(!cpumask_test_cpu(cpu, &rcu_ctrlblk.ignore_cpumask));
+    cpumask_set_cpu(cpu, &rcu_ctrlblk.ignore_cpumask);
     /*
      * If some other CPU is starting a new grace period, we'll notice that
      * by seeing a new value in rcp->cur (different than our quiescbatch).
@@ -709,12 +723,12 @@ void rcu_idle_enter(unsigned int cpu)
      */
     smp_mb();
 
-    rcu_idle_timer_start();
+    cb_timer_start();
 }
 
 void rcu_idle_exit(unsigned int cpu)
 {
-    rcu_idle_timer_stop();
-    ASSERT(cpumask_test_cpu(cpu, &rcu_ctrlblk.idle_cpumask));
-    cpumask_clear_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
+    cb_timer_stop();
+    ASSERT(cpumask_test_cpu(cpu, &rcu_ctrlblk.ignore_cpumask));
+    cpumask_clear_cpu(cpu, &rcu_ctrlblk.ignore_cpumask);
 }
